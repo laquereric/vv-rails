@@ -1,93 +1,74 @@
-# Vv Monorepo
+# vv-rails
 
-Multi-repo workspace at `/Users/ericlaquer/Documents/Focus/vv/` with 13 peer modules + 1 example app.
+Rails engine gem providing server-side Vv integration via Action Cable.
 
-## Modules
+## Key files
 
-| Module | Role | JS entry | Gem | Tests |
-|---|---|---|---|---|
-| vv-event-bus | Shared pub/sub event bus | `src/index.js` / `VvEventBus` | — | `bun test` (event-bus.test.js) |
-| vv-context-store | Message history (IndexedDB) | `src/VvContextStore.js` | — | `bun test` |
-| vv-session-store | Session metadata (IndexedDB) | `src/VvSessionStore.js` | — | `bun test` |
-| vv-model-manager | WebGPU local model inference | `src/VvModelManager.js` | — | `bun test` |
-| vv-api-manager | OpenAI/Anthropic API providers | `src/VvApiManager.js` | — | `bun test` |
-| vv-render | Turbo Stream DOM rendering | `src/VvRender.js` | — | `bun test` |
-| vv-action-cable | Rails Action Cable WebSocket | `src/VvActionCable.js` | `vv-action-cable` | `bun test` |
-| vv-mcp-manager | Model Context Protocol | `src/VvMcpManager.js` | — | `bun test` |
-| vv-acp-manager | Agent Communication Protocol | `src/VvAcpManager.js` | — | `bun test` |
-| vv-a2a-manager | Agent-to-Agent Protocol | `src/VvA2aManager.js` | — | `bun test` |
-| vv-plugin | Chrome Extension (VvRuntime) | `src/vv-runtime.js` | — | `bun test` |
-| vv-browser | Parent package, browser env | `index.js` | `vv-browser` (`Vv::Browser`) | — |
-| vv-rails | Rails engine, Action Cable | — | `vv-rails` (`Vv::Rails`) | — |
-| vv-rails-example | Example Rails app | — | — | `rails test` |
+| File | Purpose |
+|------|---------|
+| `lib/vv/rails.rb` | Main module, requires engine/config/event_bus |
+| `lib/vv/rails/engine.rb` | `Vv::Rails::Engine` — isolates namespace, auto-mounts at `/vv` |
+| `lib/vv/rails/configuration.rb` | `Vv::Rails.configure` DSL |
+| `lib/vv/rails/event_bus.rb` | Server-side pub/sub: `on`, `off`, `emit` |
+| `app/channels/vv_channel.rb` | Action Cable channel — receive, render_to, emit |
+| `app/controllers/vv/config_controller.rb` | `GET /vv/config.json` — plugin discovery |
+| `app/javascript/vv-rails/index.js` | Client JS: `connectVv()`, `disconnectVv()` |
+| `lib/generators/vv/install_generator.rb` | `rails generate vv:install` |
+| `vv-rails.gemspec` | Ruby >= 3.3, Rails >= 7.0 < 9 |
 
-## Naming conventions
+## Templates
 
-- **Folders**: `vv-{name}` (kebab-case, `vv-` prefix)
-- **npm packages**: `vv-{name}` (matches folder)
-- **JS classes**: `Vv{Name}` (PascalCase, `Vv` prefix) — e.g. `VvEventBus`, `VvModelManager`
-- **JS source files**: `Vv{Name}.js` matching class name
-- **Ruby gems**: `vv-{name}` (kebab-case)
-- **Ruby modules**: `Vv::{Name}` — e.g. `Vv::Rails`, `Vv::Browser`, `Vv::ActionCable`
-- **Ruby source files**: `lib/vv/{name}.rb` with `lib/vv/{name}/version.rb`
-- **Internal classes** (providers, clients) do NOT get `Vv` prefix: `OpenAiProvider`, `MCPClient`, `ActionCableClient`
-- **Backward-compat aliases** are exported for old class names where they existed
+| Template | Generates |
+|----------|-----------|
+| `templates/example.rb` | Browser LLM chat demo (port 3003) |
+| `templates/host.rb` | LLM relay API backend (port 3001) |
+| `templates/mobile.rb` | Mobile-optimized chat PWA (port 3002) |
+| `templates/platform_manager.rb` | Dev dashboard (port 3000) |
 
-## File structure (per JS module)
+## VvChannel API
 
-```
-vv-{name}/
-├── VERSION              # Single version source of truth (currently 0.6.0)
-├── CONTENT.md           # Module description and metadata
-├── package.json         # npm metadata, version must match VERSION
-├── src/Vv{Name}.js      # Main class export
-├── test/Vv{Name}.test.js
-├── examples/example.js
-├── README.md
-└── dev-server.js        # (some modules)
+```ruby
+# In VvChannel (received from plugin via ActionCable):
+def receive(data)
+  Vv::Rails::EventBus.emit(data["event"], data["data"], { channel: self })
+end
+
+# Channel instance methods:
+channel.render_to(target, html, action: "append")  # Turbo Stream to plugin
+channel.emit(event, data)                            # arbitrary event to plugin
 ```
 
-Gems additionally have:
+## EventBus API
+
+```ruby
+Vv::Rails::EventBus.on("chat") do |data, context|
+  channel = context[:channel]
+  channel.emit("chat:response", { content: "Hello", role: "assistant" })
+end
 ```
-├── vv-{name}.gemspec    # version reads from lib/vv/{name}/version.rb
-├── lib/vv/{name}.rb     # Module + Engine
-└── lib/vv/{name}/version.rb  # VERSION constant, must match VERSION file
+
+## Configuration
+
+```ruby
+Vv::Rails.configure do |config|
+  config.channel_prefix = "vv"           # stream prefix
+  config.cable_url = "/cable"            # WebSocket URL
+  config.allowed_origins = nil           # nil = allow all
+  config.authenticate = ->(params) { }   # auth proc
+  config.on_connect = ->(channel, params) { }
+  config.on_disconnect = ->(channel, params) { }
+end
 ```
 
-## Architecture
+## Gotchas
 
-- All JS modules import `VvEventBus` from `../../vv-event-bus/src/index.js` (relative sibling paths)
-- Constructor pattern: `new Vv{Name}(config, eventBus)`
-- `VvRuntime` (vv-plugin) is the composition kernel that wires all modules together
-- Protocol managers (MCP/ACP/A2A) are initialized on demand via `configure{Protocol}()`
-- `VvActionCable` bridges to Rails via WebSocket
+- ActionCable must be mounted: `mount ActionCable.server => "/cable"` in routes
+- Host app needs `app/channels/application_cable/{connection,channel}.rb`
+- For Chrome extension access: `config.action_cable.disable_request_forgery_protection = true`
+- Use `async` adapter (not `solid_cable`) for simple setups
 
-## Version management
+## Test
 
-- `VERSION` file in each repo root is the single source of truth
-- `package.json` `"version"` must match VERSION
-- Ruby `Vv::{Name}::VERSION` constant must match VERSION
-- Gemspec reads version via `require_relative "lib/vv/{name}/version"`
-- All modules are currently at version **0.6.0**
-
-## Build & test
-
-- **Runtime**: Bun (test runner + bundler)
-- **Test**: `bun test` in each module directory
-- **Build gems**: `gem build vv-{name}.gemspec`
-- **Build plugin**: `bun run build` in vv-plugin (outputs to `dist/`)
-- **vv-rails-example**: standard Rails app (`bundle install`, `rails server`)
-
-## GitHub repos
-
-All repos under `https://github.com/laquereric/vv-{name}`
-
-## Cross-module changes
-
-When modifying a class name, import path, or API surface in any module:
-1. Update the source module's `src/`, `test/`, `examples/`, docs
-2. Update `vv-plugin/src/vv-runtime.js` (imports + instantiation)
-3. Update `vv-plugin/src/content.js` if render/rails references changed
-4. Grep across all peer modules: `grep -r "OldName" /Users/ericlaquer/Documents/Focus/vv/vv-*/src/`
-5. Run `bun test` in each affected module
-6. Rebuild `vv-plugin` if imports changed
+```bash
+gem build vv-rails.gemspec
+```
