@@ -34,10 +34,12 @@ initializer "vv_rails.rb", <<~RUBY
     end.join("\\n")
 
     app_context = {
-      "description" => "Registration form with three fields: First Name, Last Name, and E Pluribus Unum (the national motto of the United States, meaning 'Out of many, one'). The form requires all three fields. E Pluribus Unum is a creative/unusual field that asks users to type the Latin phrase as an acknowledgment of unity.",
+      "description" => "Beneficiary designation form. The current user (John Jones) is designating a beneficiary. Fields: First Name, Last Name, and E Pluribus Unum (the national motto of the United States, meaning 'Out of many, one'). A beneficiary is a person designated to receive benefits from an account, policy, or trust. Typically this should be someone OTHER than the account holder.",
+      "currentUser" => "John Jones",
+      "formTitle" => "Beneficiary",
       "formFields" => form_fields,
       "formSummary" => field_summary,
-      "instructions" => "When the user asks about a field, explain why it is needed in the context of this form. If a required field is empty, mention that it still needs to be filled in. Be helpful and concise."
+      "instructions" => "When the user asks about a field, explain why it is needed in the context of a beneficiary designation. If a required field is empty, mention that it still needs to be filled in. Be helpful and concise."
     }
     channel.emit("chat:context:analyze", {
       pageContent: page_content, appContext: app_context
@@ -119,10 +121,10 @@ after_bundle do
   # --- View ---
 
   file "app/views/app/index.html.erb", <<~'ERB'
-    <div class="app-page" data-controller="vv-app">
-      <!-- Registration Form -->
+    <div class="app-page" data-controller="vv-app" data-vv-app-current-user-value="John Jones">
+      <!-- Beneficiary Form -->
       <div class="app-form" data-vv-app-target="frame">
-        <h2 class="app-form__heading">Registration</h2>
+        <h2 class="app-form__heading">Beneficiary</h2>
 
         <div class="app-form__field">
           <label for="first_name">First Name</label>
@@ -169,6 +171,7 @@ after_bundle do
         <header class="vv-header">
           <a href="/"><img src="/vv-logo.png" alt="Vv" class="vv-header__logo"></a>
           <span class="vv-header__title">Example App</span>
+          <span class="vv-header__user" id="current-user">User: John Jones</span>
           <span class="vv-header__plugin-status" id="plugin-status"></span>
         </header>
         <%= yield %>
@@ -183,6 +186,7 @@ after_bundle do
 
     export default class extends Controller {
       static targets = ["frame", "noPlugin"]
+      static values = { currentUser: String }
 
       connect() {
         this.pluginDetected = false
@@ -254,6 +258,22 @@ after_bundle do
       setupFormSubmit() {
         const btn = document.getElementById("form-send")
         if (!btn) return
+
+        // Listen for validation results from the plugin
+        window.addEventListener("message", (event) => {
+          if (event.source !== window) return
+          if (event.data?.type !== "vv:form:validate:result") return
+
+          const status = document.getElementById("form-status")
+          const { ok, answer, explanation } = event.data
+
+          if (ok) {
+            if (status) { status.textContent = "Submitted!"; status.style.color = "#28a745" }
+          } else {
+            if (status) { status.textContent = "Review needed — see chat sidebar"; status.style.color = "#e67e22" }
+          }
+        })
+
         btn.addEventListener("click", () => {
           const first = document.getElementById("first_name")?.value?.trim()
           const last = document.getElementById("last_name")?.value?.trim()
@@ -264,7 +284,28 @@ after_bundle do
             if (status) { status.textContent = "Please fill in all fields."; status.style.color = "#dc3545" }
             return
           }
-          if (status) { status.textContent = "Submitted!"; status.style.color = "#28a745" }
+
+          // Intercept: ask LLM "does this look right?" before submitting
+          if (status) { status.textContent = "Validating..."; status.style.color = "#667eea" }
+          btn.disabled = true
+
+          const formTitle = "Beneficiary"
+          const currentUser = this.currentUserValue || "Unknown"
+          const formFields = {
+            first_name: { label: "First Name", value: first },
+            last_name: { label: "Last Name", value: last },
+            e_pluribus_unum: { label: "E Pluribus Unum", value: epu }
+          }
+
+          window.postMessage({
+            type: "vv:form:validate",
+            currentUser,
+            formTitle,
+            formFields
+          }, "*")
+
+          // Re-enable after timeout in case plugin doesn't respond
+          setTimeout(() => { btn.disabled = false }, 15000)
         })
       }
     }
@@ -281,6 +322,7 @@ after_bundle do
     .vv-header { background: #1a1a2e; padding: 0 24px; display: flex; align-items: center; height: 56px; gap: 16px; }
     .vv-header__logo { height: 36px; }
     .vv-header__title { color: rgba(255,255,255,0.7); font-size: 15px; flex: 1; }
+    .vv-header__user { color: rgba(255,255,255,0.85); font-size: 14px; font-weight: 500; }
     .vv-header__plugin-status { font-size: 12px; padding: 4px 10px; border-radius: 12px; background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.5); }
     .vv-header__plugin-status--active { background: rgba(40,167,69,0.2); color: #28a745; }
     .vv-header__plugin-status--inactive { background: rgba(220,53,69,0.2); color: #dc3545; }
