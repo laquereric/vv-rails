@@ -21,6 +21,26 @@ initializer "vv_rails.rb", <<~RUBY
 RUBY
 
 after_bundle do
+  # --- Vv logo ---
+  logo_src = File.join(File.dirname(__FILE__), "vv-logo.png")
+  copy_file logo_src, "public/vv-logo.png" if File.exist?(logo_src)
+
+  # --- Action Cable base classes (required by vv-rails engine VvChannel) ---
+
+  file "app/channels/application_cable/connection.rb", <<~RUBY
+    module ApplicationCable
+      class Connection < ActionCable::Connection::Base
+      end
+    end
+  RUBY
+
+  file "app/channels/application_cable/channel.rb", <<~RUBY
+    module ApplicationCable
+      class Channel < ActionCable::Channel::Base
+      end
+    end
+  RUBY
+
   # --- Routes (engine auto-mounts at /vv via initializer) ---
 
   route <<~RUBY
@@ -103,7 +123,7 @@ after_bundle do
       <body data-controller="offline">
         <header class="mobile-header">
           <nav class="mobile-nav">
-            <a href="/" class="mobile-nav__brand">Vv</a>
+            <a href="/" class="mobile-nav__brand"><img src="/vv-logo.png" alt="Vv" style="height: 28px;"></a>
             <div class="mobile-nav__status">
               <span class="mobile-nav__connectivity" data-offline-target="indicator">Online</span>
             </div>

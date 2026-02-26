@@ -24,9 +24,15 @@ initializer "vv_rails.rb", <<~RUBY
 RUBY
 
 after_bundle do
+  # --- Vv logo ---
+  logo_src = File.join(File.dirname(__FILE__), "vv-logo.png")
+  copy_file logo_src, "public/vv-logo.png" if File.exist?(logo_src)
+
   # --- Routes (engine auto-mounts at /vv via initializer) ---
 
   route <<~RUBY
+    root "home#index"
+
     namespace :api do
       post "auth/token", to: "auth#token"
 
@@ -38,6 +44,57 @@ after_bundle do
       post "relay", to: "relay#create"
     end
   RUBY
+
+  # --- HomeController ---
+
+  file "app/controllers/home_controller.rb", <<~RUBY
+    class HomeController < ApplicationController
+      def index
+      end
+    end
+  RUBY
+
+  # --- Layout with Vv logo ---
+
+  remove_file "app/views/layouts/application.html.erb"
+  file "app/views/layouts/application.html.erb", <<~'ERB'
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title><%= content_for(:title) || "Vv Host" %></title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="icon" href="/icon.png" type="image/png">
+        <%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>
+        <%= javascript_importmap_tags %>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #f5f5f5; color: #333; }
+          .vv-header { background: #1a1a2e; padding: 12px 24px; display: flex; align-items: center; }
+          .vv-header__logo { height: 40px; }
+          .vv-main { max-width: 800px; margin: 0 auto; padding: 24px; }
+        </style>
+      </head>
+      <body>
+        <header class="vv-header">
+          <a href="/"><img src="/vv-logo.png" alt="Vv" class="vv-header__logo"></a>
+        </header>
+        <main class="vv-main">
+          <%= yield %>
+        </main>
+      </body>
+    </html>
+  ERB
+
+  # --- Home page view ---
+
+  file "app/views/home/index.html.erb", <<~'ERB'
+    <div style="text-align: center; padding: 60px 20px;">
+      <img src="/vv-logo.png" alt="Vv" style="max-width: 400px; width: 100%; margin-bottom: 24px;">
+      <h1 style="font-size: 24px; color: #1a1a2e; margin-bottom: 8px;">Vv Host</h1>
+      <p style="color: #666;">LLM relay API backend</p>
+      <p style="margin-top: 24px; font-size: 14px; color: #999;">API base: <code>/api</code> &middot; Plugin config: <code>/vv/config.json</code></p>
+    </div>
+  ERB
 
   # --- Migrations ---
 
@@ -291,6 +348,22 @@ after_bundle do
             Provider.active.by_priority.first
           end
         end
+      end
+    end
+  RUBY
+
+  # --- Action Cable base classes ---
+
+  file "app/channels/application_cable/connection.rb", <<~RUBY
+    module ApplicationCable
+      class Connection < ActionCable::Connection::Base
+      end
+    end
+  RUBY
+
+  file "app/channels/application_cable/channel.rb", <<~RUBY
+    module ApplicationCable
+      class Channel < ActionCable::Channel::Base
       end
     end
   RUBY
