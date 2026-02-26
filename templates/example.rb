@@ -62,6 +62,156 @@ initializer "vv_rails.rb", <<~RUBY
     # This handler is available for app-level hooks (logging, persistence, etc.)
     Rails.logger.info "[vv] chat received: \#{data['content']&.truncate(80)}"
   end
+
+  # --- Form submit: easter egg detection + LLM validation ---
+
+  form_validations = {}
+
+  Vv::Rails::EventBus.on("form:submit") do |data, context|
+    channel = context[:channel]
+    fields = data["fields"] || {}
+    current_user = data["currentUser"] || "Unknown"
+    form_title = data["formTitle"] || "Form"
+
+    # Check for easter egg
+    epu_value = fields.dig("e_pluribus_unum", "value").to_s
+    if epu_value.downcase.strip == "easter egg"
+      first_name = fields.dig("first_name", "value").to_s
+      last_name = fields.dig("last_name", "value").to_s
+
+      easter_egg_html = <<~HTML
+        <div class="vv-rich__header">
+          <span class="vv-rich__badge"><svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 100 100">
+            <defs>
+              <linearGradient id="egg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" style="stop-color:#f6d365"/>
+                <stop offset="50%" style="stop-color:#fda085"/>
+                <stop offset="100%" style="stop-color:#f6d365"/>
+              </linearGradient>
+              <linearGradient id="band-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" style="stop-color:#667eea"/>
+                <stop offset="100%" style="stop-color:#764ba2"/>
+              </linearGradient>
+            </defs>
+            <ellipse cx="50" cy="55" rx="32" ry="40" fill="url(#egg-grad)" stroke="#e0a030" stroke-width="2"/>
+            <path d="M 18 50 Q 50 35, 82 50" fill="none" stroke="url(#band-grad)" stroke-width="5" stroke-linecap="round"/>
+            <path d="M 22 60 Q 50 75, 78 60" fill="none" stroke="url(#band-grad)" stroke-width="3" stroke-linecap="round" opacity="0.6"/>
+            <circle cx="38" cy="45" r="3" fill="#764ba2" opacity="0.7"/>
+            <circle cx="58" cy="42" r="4" fill="#667eea" opacity="0.7"/>
+            <circle cx="50" cy="58" r="2.5" fill="#f6d365" opacity="0.8"/>
+            <circle cx="42" cy="65" r="2" fill="#fda085" opacity="0.6"/>
+            <circle cx="62" cy="55" r="3" fill="#764ba2" opacity="0.5"/>
+            <text x="50" y="12" text-anchor="middle" font-size="14">&#10024;</text>
+          </svg></span>
+          <span class="vv-rich__header-text">Easter Egg Found!</span>
+        </div>
+
+        <div class="vv-rich__body">
+          Congratulations, <strong>\#{first_name} \#{last_name}</strong>! You discovered the hidden easter egg
+          in the Beneficiary form. <em>E Pluribus Unum</em> &mdash; "Out of many, one" &mdash; is the motto on
+          the Great Seal of the United States, symbolizing the union of states and people into one nation.
+        </div>
+
+        <div class="vv-rich__divider"></div>
+
+        <img class="vv-rich__image"
+             src="https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/Greater_coat_of_arms_of_the_United_States.svg/600px-Greater_coat_of_arms_of_the_United_States.svg.png"
+             alt="Great Seal of the United States"
+             onerror="this.style.display='none'">
+
+        <div class="vv-rich__body" style="font-size: 13px; opacity: 0.9;">
+          The phrase first appeared on the <em>Fugio cent</em> (1787), the first official U.S. coin,
+          and has been featured on the Great Seal since 1782. It was the de facto national motto until
+          1956, when "In God We Trust" was officially adopted.
+        </div>
+
+        <div class="vv-rich__divider"></div>
+
+        <div class="vv-rich__links">
+          <a class="vv-rich__link vv-rich__link--primary"
+             href="https://en.wikipedia.org/wiki/E_pluribus_unum"
+             target="_blank" rel="noopener">
+            &#128214; Wikipedia
+          </a>
+          <a class="vv-rich__link vv-rich__link--secondary"
+             href="https://www.greatseal.com/mottoes/unum.html"
+             target="_blank" rel="noopener">
+            &#127963;&#65039; Great Seal History
+          </a>
+          <a class="vv-rich__link vv-rich__link--secondary"
+             href="https://github.com/laquereric/vv-plugin"
+             target="_blank" rel="noopener">
+            &#9889; Vv Plugin
+          </a>
+        </div>
+
+        <div class="vv-rich__divider"></div>
+
+        <div class="vv-rich__footer">
+          Discovered by \#{current_user}
+        </div>
+      HTML
+
+      channel.emit("sidebar:open", {})
+      channel.emit("sidebar:message", { html: easter_egg_html })
+      channel.emit("form:submit:result", { ok: true, answer: "egg", explanation: "" })
+      next
+    end
+
+    # Normal validation: build LLM prompt and request
+    field_summary = (fields || {}).map do |key, info|
+      label = info["label"] || key
+      value = info["value"].to_s
+      "  - \#{label}: \\"\#{value}\\""
+    end.join("\\n")
+
+    request_id = SecureRandom.hex(8)
+    messages = [
+      {
+        "role" => "system",
+        "content" => "You are a form validation assistant. The current logged-in user is \\"\#{current_user}\\". A \\"\#{form_title}\\" form has been filled out. A beneficiary is a person designated to receive benefits — typically someone OTHER than the account holder/current user.\\n\\nRespond ONLY with valid JSON: {\\"answer\\":\\"yes\\",\\"explanation\\":\\"...\\"} or {\\"answer\\":\\"no\\",\\"explanation\\":\\"...\\"}. The explanation should be 1-2 sentences. If the answer is \\"no\\", explain clearly what seems wrong (e.g. if the user designated themselves as their own beneficiary, explain what a beneficiary is and why they should designate someone else)."
+      },
+      {
+        "role" => "user",
+        "content" => "Current User: \#{current_user}\\nForm: \#{form_title}\\nFields:\\n\#{field_summary}\\n\\nDoes this look right?"
+      }
+    ]
+
+    form_validations[request_id] = { channel: channel, data: data }
+    channel.emit("llm:request", {
+      requestId: request_id,
+      messages: messages,
+      options: { max_tokens: 256, temperature: 0.3 }
+    })
+  end
+
+  Vv::Rails::EventBus.on("llm:response") do |data, context|
+    request_id = data["requestId"]
+    pending = form_validations.delete(request_id)
+    next unless pending
+
+    channel = pending[:channel]
+    raw = data["response"].to_s
+
+    # Parse JSON from response (may be wrapped in markdown code block)
+    parsed = begin
+      json_match = raw.match(/\\{[\\s\\S]*\\}/)
+      json_match ? JSON.parse(json_match[0]) : { "answer" => "yes", "explanation" => raw }
+    rescue JSON::ParserError
+      { "answer" => "yes", "explanation" => raw }
+    end
+
+    ok = parsed["answer"].to_s.downcase.start_with?("y")
+    explanation = parsed["explanation"].to_s
+
+    if ok
+      channel.emit("form:submit:result", { ok: true, answer: parsed["answer"], explanation: explanation })
+    else
+      channel.emit("sidebar:open", {})
+      channel.emit("sidebar:message", { content: explanation, label: "Form Review" })
+      channel.emit("form:submit:result", { ok: false, answer: parsed["answer"], explanation: explanation })
+    end
+  end
 RUBY
 
 after_bundle do
@@ -147,7 +297,7 @@ after_bundle do
 
       <!-- No-plugin notice -->
       <div class="no-plugin" data-vv-app-target="noPlugin">
-        <p>Vv plugin not detected.</p>
+        <p>Vv extension not detected.</p>
         <p class="no-plugin__hint">Install the <a href="https://github.com/laquereric/vv-plugin" target="_blank">Vv Chrome Extension</a> to enable AI chat.</p>
       </div>
     </div>
@@ -171,8 +321,8 @@ after_bundle do
         <header class="vv-header">
           <a href="/"><img src="/vv-logo.png" alt="Vv" class="vv-header__logo"></a>
           <span class="vv-header__title">Example App</span>
-          <span class="vv-header__user" id="current-user">User: John Jones</span>
           <span class="vv-header__plugin-status" id="plugin-status"></span>
+          <span class="vv-header__user" id="current-user">User: John Jones</span>
         </header>
         <%= yield %>
       </body>
@@ -225,9 +375,13 @@ after_bundle do
         this.pluginDetected = true
         this.noPluginTarget.style.display = "none"
 
+        // Remember extension ID for disabled-vs-missing detection
+        const extId = document.documentElement.getAttribute("data-vv-extension-id")
+        if (extId) localStorage.setItem("vv-extension-id", extId)
+
         const status = document.getElementById("plugin-status")
         if (status) {
-          status.textContent = "Plugin Active"
+          status.textContent = "Vv Active"
           status.classList.add("vv-header__plugin-status--active")
         }
 
@@ -247,10 +401,36 @@ after_bundle do
 
       onNoPlugin() {
         this.noPluginTarget.style.display = "block"
+        const notice = this.noPluginTarget
         const status = document.getElementById("plugin-status")
-        if (status) {
-          status.textContent = "No Plugin"
-          status.classList.add("vv-header__plugin-status--inactive")
+
+        // Check if extension is installed but disabled by probing a
+        // web-accessible resource. If installed, the content script
+        // would have set data-vv-extension-id; without it, we must
+        // check all known extension IDs — but a simpler heuristic:
+        // the attribute is absent when disabled, so we probe the
+        // Chrome Web Store / known install path.
+        // Since we can't know the ID without the content script,
+        // we show "No Vv Extension" by default and upgrade to
+        // "Vv Extension Disabled" if the user previously had it
+        // (stored in localStorage).
+        const knownId = localStorage.getItem("vv-extension-id")
+        if (knownId) {
+          // Extension was previously active — try probing its resource
+          const probeUrl = `chrome-extension://${knownId}/vv-probe.txt`
+          fetch(probeUrl, { mode: "no-cors" }).then(() => {
+            // Resource loaded — extension is installed but disabled
+            if (notice) notice.querySelector("p").textContent = "Vv extension is disabled."
+            if (status) { status.textContent = "Vv Disabled"; status.classList.add("vv-header__plugin-status--inactive") }
+          }).catch(() => {
+            // Extension not installed (removed)
+            localStorage.removeItem("vv-extension-id")
+            if (notice) notice.querySelector("p").textContent = "Vv extension not detected."
+            if (status) { status.textContent = "No Vv Extension"; status.classList.add("vv-header__plugin-status--inactive") }
+          })
+        } else {
+          if (notice) notice.querySelector("p").textContent = "Vv extension not detected."
+          if (status) { status.textContent = "No Vv Extension"; status.classList.add("vv-header__plugin-status--inactive") }
         }
       }
 
@@ -259,19 +439,22 @@ after_bundle do
         const btn = document.getElementById("form-send")
         if (!btn) return
 
-        // Listen for validation results from the plugin
+        // Listen for results from Rails (via plugin)
         window.addEventListener("message", (event) => {
           if (event.source !== window) return
-          if (event.data?.type !== "vv:form:validate:result") return
+          if (event.data?.type !== "vv:form:submit:result") return
 
           const status = document.getElementById("form-status")
-          const { ok, answer, explanation } = event.data
+          const { ok, answer } = event.data
 
-          if (ok) {
+          if (answer === "egg") {
+            if (status) { status.textContent = "\u{1F95A} You found it!"; status.style.color = "#764ba2" }
+          } else if (ok) {
             if (status) { status.textContent = "Submitted!"; status.style.color = "#28a745" }
           } else {
-            if (status) { status.textContent = "Review needed — see chat sidebar"; status.style.color = "#e67e22" }
+            if (status) { status.textContent = "Review needed \u2014 see chat sidebar"; status.style.color = "#e67e22" }
           }
+          btn.disabled = false
         })
 
         btn.addEventListener("click", () => {
@@ -285,38 +468,24 @@ after_bundle do
             return
           }
 
-          // Easter egg check
-          if (epu.toLowerCase() === "easter egg") {
-            if (status) { status.textContent = "🥚 You found it!"; status.style.color = "#764ba2" }
-            window.postMessage({
-              type: "vv:form:easter-egg",
-              currentUser: this.currentUserValue || "Unknown",
-              firstName: first,
-              lastName: last
-            }, "*")
-            return
-          }
-
-          // Intercept: ask LLM "does this look right?" before submitting
           if (status) { status.textContent = "Validating..."; status.style.color = "#667eea" }
           btn.disabled = true
 
-          const formTitle = "Beneficiary"
           const currentUser = this.currentUserValue || "Unknown"
-          const formFields = {
-            first_name: { label: "First Name", value: first },
-            last_name: { label: "Last Name", value: last },
-            e_pluribus_unum: { label: "E Pluribus Unum", value: epu }
-          }
-
           window.postMessage({
-            type: "vv:form:validate",
-            currentUser,
-            formTitle,
-            formFields
+            type: "vv:form:submit",
+            data: {
+              formTitle: "Beneficiary",
+              currentUser,
+              fields: {
+                first_name: { label: "First Name", value: first },
+                last_name: { label: "Last Name", value: last },
+                e_pluribus_unum: { label: "E Pluribus Unum", value: epu }
+              }
+            }
           }, "*")
 
-          // Re-enable after timeout in case plugin doesn't respond
+          // Re-enable after timeout in case no response
           setTimeout(() => { btn.disabled = false }, 15000)
         })
       }
