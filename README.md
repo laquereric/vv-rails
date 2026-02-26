@@ -133,6 +133,28 @@ GET /vv/config.json
 4. Handlers can call `channel.render_to` or `channel.emit` to respond
 5. Plugin content script applies DOM updates via Turbo Stream actions
 
+## Templates
+
+Application templates for generating complete Rails apps with vv-rails pre-configured.
+
+| Template | Generates | Command |
+|----------|-----------|---------|
+| example  | vv-rails-example | `rails new myapp -m vendor/vv-rails/templates/example.rb` |
+| host     | vv-host          | `rails new myapp -m vendor/vv-rails/templates/host.rb` |
+| mobile   | vv-mobile        | `rails new myapp -m vendor/vv-rails/templates/mobile.rb` |
+
+### example.rb
+
+Generates a browser-side LLM chat demo. Adds Stimulus controllers for WebGPU model loading via WebLLM, a chat interface, and model status management. Runs entirely client-side — no backend inference server required.
+
+### host.rb
+
+Generates an API backend that relays LLM traffic to upstream providers and stores sessions/context in PostgreSQL for multi-device access. Includes token authentication, Action Cable relay channels, and a multi-provider routing system.
+
+### mobile.rb
+
+Generates a mobile-optimized chat UI that connects to a vv-host backend. Includes responsive touch-friendly layout, PWA manifest and service worker scaffold, and session sync via Action Cable.
+
 ## Files
 
 | File | Purpose |
@@ -145,6 +167,9 @@ GET /vv/config.json
 | `app/controllers/vv/config_controller.rb` | Plugin discovery endpoint |
 | `app/javascript/vv-rails/index.js` | Client JS auto-connect |
 | `lib/generators/vv/install_generator.rb` | `rails generate vv:install` |
+| `templates/example.rb` | Application template — browser chat demo |
+| `templates/host.rb` | Application template — LLM relay backend |
+| `templates/mobile.rb` | Application template — mobile chat app |
 
 ## Requirements
 
