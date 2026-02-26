@@ -120,7 +120,7 @@ GET /vv/config.json
 {
   "cable_url": "ws://localhost:3000/cable",
   "channel": "VvChannel",
-  "version": "0.1.0",
+  "version": "0.7.0",
   "prefix": "vv"
 }
 ```
