@@ -23,9 +23,21 @@ initializer "vv_rails.rb", <<~RUBY
   Vv::Rails::EventBus.on("chat:typing") do |data, context|
     channel = context[:channel]
     page_content = data["pageContent"] || {}
+    form_fields = page_content["formFields"] || {}
+
+    # Build a human-readable summary of form state
+    field_summary = form_fields.map do |name, info|
+      label = info["label"] || name
+      value = info["value"].to_s
+      status = value.strip.empty? ? "EMPTY" : "filled in with: \#{value}"
+      "  - \#{label}: \#{status}"
+    end.join("\\n")
+
     app_context = {
-      "description" => "Example app — user is viewing the main page",
-      "availableActions" => ["navigate", "fill form", "submit"]
+      "description" => "Registration form with three fields: First Name, Last Name, and E Pluribus Unum (the national motto of the United States, meaning 'Out of many, one'). The form requires all three fields. E Pluribus Unum is a creative/unusual field that asks users to type the Latin phrase as an acknowledgment of unity.",
+      "formFields" => form_fields,
+      "formSummary" => field_summary,
+      "instructions" => "When the user asks about a field, explain why it is needed in the context of this form. If a required field is empty, mention that it still needs to be filled in. Be helpful and concise."
     }
     channel.emit("chat:context:analyze", {
       pageContent: page_content, appContext: app_context
@@ -108,9 +120,27 @@ after_bundle do
 
   file "app/views/app/index.html.erb", <<~'ERB'
     <div class="app-page" data-controller="vv-app">
-      <!-- App Frame — always visible -->
-      <div class="app-frame" data-vv-app-target="frame">
-        <span class="app-frame__label">Your App Here</span>
+      <!-- Registration Form -->
+      <div class="app-form" data-vv-app-target="frame">
+        <h2 class="app-form__heading">Registration</h2>
+
+        <div class="app-form__field">
+          <label for="first_name">First Name</label>
+          <input type="text" id="first_name" name="first_name" data-field="first_name" placeholder="Enter your first name" autocomplete="off">
+        </div>
+
+        <div class="app-form__field">
+          <label for="last_name">Last Name</label>
+          <input type="text" id="last_name" name="last_name" data-field="last_name" placeholder="Enter your last name" autocomplete="off">
+        </div>
+
+        <div class="app-form__field">
+          <label for="e_pluribus_unum">E Pluribus Unum</label>
+          <input type="text" id="e_pluribus_unum" name="e_pluribus_unum" data-field="e_pluribus_unum" placeholder="Out of many, one" autocomplete="off">
+        </div>
+
+        <button type="button" class="app-form__submit" id="form-send">Send</button>
+        <div class="app-form__status" id="form-status"></div>
       </div>
 
       <!-- No-plugin notice -->
@@ -207,6 +237,8 @@ after_bundle do
 
         // Tell the plugin to show its Shadow DOM chat UI
         window.postMessage({ type: "vv:chatbox:show" }, "*")
+
+        this.setupFormSubmit()
       }
 
       onNoPlugin() {
@@ -216,6 +248,24 @@ after_bundle do
           status.textContent = "No Plugin"
           status.classList.add("vv-header__plugin-status--inactive")
         }
+      }
+
+      // --- Form Submit ---
+      setupFormSubmit() {
+        const btn = document.getElementById("form-send")
+        if (!btn) return
+        btn.addEventListener("click", () => {
+          const first = document.getElementById("first_name")?.value?.trim()
+          const last = document.getElementById("last_name")?.value?.trim()
+          const epu = document.getElementById("e_pluribus_unum")?.value?.trim()
+          const status = document.getElementById("form-status")
+
+          if (!first || !last || !epu) {
+            if (status) { status.textContent = "Please fill in all fields."; status.style.color = "#dc3545" }
+            return
+          }
+          if (status) { status.textContent = "Submitted!"; status.style.color = "#28a745" }
+        })
       }
     }
   JS
@@ -238,9 +288,16 @@ after_bundle do
     /* App Page */
     .app-page { display: flex; flex-direction: column; align-items: center; padding: 48px 24px; min-height: calc(100vh - 56px); position: relative; }
 
-    /* App Frame */
-    .app-frame { width: 100%; max-width: 640px; height: 400px; border: 2px dashed #ccc; border-radius: 12px; display: flex; align-items: center; justify-content: center; background: white; transition: border-color 0.3s ease; }
-    .app-frame__label { font-size: 24px; color: #bbb; font-weight: 300; letter-spacing: 1px; }
+    /* Form */
+    .app-form { width: 100%; max-width: 480px; background: white; border-radius: 12px; padding: 36px 32px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .app-form__heading { font-size: 22px; font-weight: 600; color: #1a1a2e; margin-bottom: 28px; }
+    .app-form__field { margin-bottom: 20px; }
+    .app-form__field label { display: block; font-size: 14px; font-weight: 500; color: #555; margin-bottom: 6px; }
+    .app-form__field input { width: 100%; padding: 12px 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 15px; outline: none; transition: border-color 0.2s; }
+    .app-form__field input:focus { border-color: #667eea; }
+    .app-form__submit { width: 100%; padding: 14px; background: linear-gradient(135deg, #667eea, #764ba2); color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 8px; transition: opacity 0.2s; }
+    .app-form__submit:hover { opacity: 0.9; }
+    .app-form__status { text-align: center; margin-top: 12px; font-size: 14px; color: #28a745; min-height: 20px; }
 
     /* No Plugin Notice */
     .no-plugin { display: none; text-align: center; margin-top: 20px; color: #888; font-size: 14px; }
