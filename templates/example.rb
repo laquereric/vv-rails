@@ -44,9 +44,9 @@ initializer "vv_rails.rb", <<~RUBY
   end
 
   Vv::Rails::EventBus.on("chat") do |data, context|
-    channel = context[:channel]
-    ctx = data["systemPromptPatch"] ? "\\n\\nContext: \#{data['systemPromptPatch']}" : ""
-    channel.emit("chat:response", { content: "Echo: \#{data['content']}\#{ctx}", role: "assistant" })
+    # No echo — the plugin routes chat to the LLM directly.
+    # This handler is available for app-level hooks (logging, persistence, etc.)
+    Rails.logger.info "[vv] chat received: \#{data['content']&.truncate(80)}"
   end
 RUBY
 
