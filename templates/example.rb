@@ -285,6 +285,18 @@ after_bundle do
             return
           }
 
+          // Easter egg check
+          if (epu.toLowerCase() === "easter egg") {
+            if (status) { status.textContent = "🥚 You found it!"; status.style.color = "#764ba2" }
+            window.postMessage({
+              type: "vv:form:easter-egg",
+              currentUser: this.currentUserValue || "Unknown",
+              firstName: first,
+              lastName: last
+            }, "*")
+            return
+          }
+
           // Intercept: ask LLM "does this look right?" before submitting
           if (status) { status.textContent = "Validating..."; status.style.color = "#667eea" }
           btn.disabled = true

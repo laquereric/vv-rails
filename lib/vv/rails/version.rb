@@ -1,5 +1,5 @@
 module Vv
   module Rails
-    VERSION = "0.7.8"
+    VERSION = "0.7.9"
   end
 end
