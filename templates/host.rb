@@ -1,11 +1,11 @@
 # vv-rails host template
 #
 # Generates an API backend that relays LLM traffic to upstream providers,
-# stores sessions and context in PostgreSQL, and serves as a multi-device
+# stores sessions and context in SQLite, and serves as a multi-device
 # Action Cable hub for Vv-connected applications.
 #
 # Usage:
-#   rails new myapp -d postgresql -m vendor/vv-rails/templates/host.rb
+#   rails new myapp -m vendor/vv-rails/templates/host.rb
 #
 
 # --- Gems ---
@@ -41,9 +41,9 @@ after_bundle do
 
   # --- Migrations ---
 
-  generate "migration", "CreateSessions user_token:string title:string metadata:jsonb"
-  generate "migration", "CreateContexts session:references role:string content:text metadata:jsonb"
-  generate "migration", "CreateProviders name:string api_base:string api_key_ciphertext:string models:jsonb priority:integer active:boolean"
+  generate "migration", "CreateSessions user_token:string title:string metadata:json"
+  generate "migration", "CreateContexts session:references role:string content:text metadata:json"
+  generate "migration", "CreateProviders name:string api_base:string api_key_ciphertext:string models:json priority:integer active:boolean"
   generate "migration", "CreateApiTokens token_digest:string:index label:string expires_at:datetime"
 
   # --- Models ---
