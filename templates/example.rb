@@ -2,8 +2,8 @@
 #
 # Generates an example app that detects the Vv browser plugin.
 # Without plugin: displays an empty app frame with "Your App Here".
-# With plugin: adds a chat input; typing opens a sidebar, sending
-# opens it fully and relays to the LLM via the plugin.
+# With plugin: tells the plugin to show its Shadow DOM chat UI and
+# routes chat messages through ActionCable via the Rails EventBus.
 #
 # Usage:
 #   rails new myapp -m vendor/vv-rails/templates/example.rb
@@ -18,6 +18,35 @@ gem "vv-rails", path: "vendor/vv-rails"
 initializer "vv_rails.rb", <<~RUBY
   Vv::Rails.configure do |config|
     config.channel_prefix = "vv"
+  end
+
+  Vv::Rails::EventBus.on("chat:typing") do |data, context|
+    channel = context[:channel]
+    page_content = data["pageContent"] || {}
+    app_context = {
+      "description" => "Example app — user is viewing the main page",
+      "availableActions" => ["navigate", "fill form", "submit"]
+    }
+    channel.emit("chat:context:analyze", {
+      pageContent: page_content, appContext: app_context
+    })
+  end
+
+  Vv::Rails::EventBus.on("chat:context") do |data, context|
+    channel = context[:channel]
+    channel.emit("chat:context:display", {
+      content: data["summary"] || "Analyzing...",
+      label: "I see you're working on"
+    })
+    channel.emit("chat:context:ready", {
+      systemPromptPatch: data["systemPromptPatch"]
+    })
+  end
+
+  Vv::Rails::EventBus.on("chat") do |data, context|
+    channel = context[:channel]
+    ctx = data["systemPromptPatch"] ? "\\n\\nContext: \#{data['systemPromptPatch']}" : ""
+    channel.emit("chat:response", { content: "Echo: \#{data['content']}\#{ctx}", role: "assistant" })
   end
 RUBY
 
@@ -42,6 +71,26 @@ after_bundle do
     end
   RUBY
 
+  # --- ActionCable: mount WebSocket endpoint, async adapter, allow plugin origins ---
+
+  route 'mount ActionCable.server => "/cable"'
+
+  remove_file "config/cable.yml"
+  file "config/cable.yml", <<~YAML
+    development:
+      adapter: async
+
+    test:
+      adapter: test
+
+    production:
+      adapter: async
+  YAML
+
+  environment <<~RUBY, env: :production
+    config.action_cable.disable_request_forgery_protection = true
+  RUBY
+
   # --- Routes ---
 
   route 'root "app#index"'
@@ -64,33 +113,10 @@ after_bundle do
         <span class="app-frame__label">Your App Here</span>
       </div>
 
-      <!-- Chat input — shown only when plugin detected -->
-      <div class="chat-bar chat-bar--hidden" data-vv-app-target="chatBar">
-        <input type="text"
-               class="chat-bar__input"
-               placeholder="Message the AI..."
-               data-vv-app-target="input"
-               data-action="input->vv-app#onInput keydown->vv-app#onKeydown"
-               autocomplete="off">
-        <button class="chat-bar__send"
-                data-action="click->vv-app#send"
-                data-vv-app-target="sendBtn">Send</button>
-      </div>
-
       <!-- No-plugin notice -->
       <div class="no-plugin" data-vv-app-target="noPlugin">
         <p>Vv plugin not detected.</p>
         <p class="no-plugin__hint">Install the <a href="https://github.com/laquereric/vv-plugin" target="_blank">Vv Chrome Extension</a> to enable AI chat.</p>
-      </div>
-
-      <!-- Right sidebar -->
-      <div class="sidebar" data-vv-app-target="sidebar">
-        <div class="sidebar__header">
-          <span class="sidebar__title">Vv Chat</span>
-          <button class="sidebar__close" data-action="click->vv-app#closeSidebar">&times;</button>
-        </div>
-        <div class="sidebar__messages" data-vv-app-target="messages"></div>
-        <div class="sidebar__status" data-vv-app-target="status"></div>
       </div>
     </div>
   ERB
@@ -126,11 +152,10 @@ after_bundle do
     import { Controller } from "@hotwired/stimulus"
 
     export default class extends Controller {
-      static targets = ["frame", "chatBar", "noPlugin", "sidebar", "messages", "input", "sendBtn", "status"]
+      static targets = ["frame", "noPlugin"]
 
       connect() {
         this.pluginDetected = false
-        this.sidebarState = "closed" // closed | peek | open
         this.detectPlugin()
       }
 
@@ -164,7 +189,6 @@ after_bundle do
 
       onPluginFound() {
         this.pluginDetected = true
-        this.chatBarTarget.classList.remove("chat-bar--hidden")
         this.noPluginTarget.style.display = "none"
 
         const status = document.getElementById("plugin-status")
@@ -180,6 +204,9 @@ after_bundle do
           channel: "VvChannel",
           pageId: "example"
         }, "*")
+
+        // Tell the plugin to show its Shadow DOM chat UI
+        window.postMessage({ type: "vv:chatbox:show" }, "*")
       }
 
       onNoPlugin() {
@@ -188,104 +215,6 @@ after_bundle do
         if (status) {
           status.textContent = "No Plugin"
           status.classList.add("vv-header__plugin-status--inactive")
-        }
-      }
-
-      // --- Sidebar ---
-
-      onInput() {
-        const value = this.inputTarget.value
-        if (value.length >= 1 && this.sidebarState === "closed") {
-          this.peekSidebar()
-        }
-        if (value.length === 0 && this.sidebarState === "peek") {
-          this.closeSidebar()
-        }
-      }
-
-      onKeydown(event) {
-        if (event.key === "Enter") {
-          event.preventDefault()
-          this.send()
-        }
-      }
-
-      peekSidebar() {
-        this.sidebarState = "peek"
-        this.sidebarTarget.classList.add("sidebar--peek")
-        this.sidebarTarget.classList.remove("sidebar--open")
-      }
-
-      openSidebar() {
-        this.sidebarState = "open"
-        this.sidebarTarget.classList.remove("sidebar--peek")
-        this.sidebarTarget.classList.add("sidebar--open")
-      }
-
-      closeSidebar() {
-        this.sidebarState = "closed"
-        this.sidebarTarget.classList.remove("sidebar--peek", "sidebar--open")
-      }
-
-      // --- Chat ---
-
-      send() {
-        const message = this.inputTarget.value.trim()
-        if (!message) return
-
-        this.openSidebar()
-        this.addMessage("user", message)
-        this.inputTarget.value = ""
-
-        this.setStatus("Thinking...")
-        this.sendBtn = this.sendBtnTarget
-        this.sendBtn.disabled = true
-
-        // Send chat message to the plugin's background service worker
-        // via postMessage → content script → chrome.runtime.sendMessage
-        window.postMessage({
-          type: "vv:chat",
-          content: message
-        }, "*")
-
-        // Listen for the response from the plugin
-        const responseHandler = (event) => {
-          if (event.data?.type === "vv:chat:response") {
-            window.removeEventListener("message", responseHandler)
-            this.addMessage("assistant", event.data.content)
-            this.setStatus("")
-            this.sendBtnTarget.disabled = false
-          } else if (event.data?.type === "vv:chat:error") {
-            window.removeEventListener("message", responseHandler)
-            this.addMessage("system", `Error: ${event.data.error}`)
-            this.setStatus("")
-            this.sendBtnTarget.disabled = false
-          }
-        }
-        window.addEventListener("message", responseHandler)
-
-        // Timeout fallback
-        setTimeout(() => {
-          window.removeEventListener("message", responseHandler)
-          if (this.sendBtnTarget.disabled) {
-            this.addMessage("system", "No response from plugin. Is a model loaded?")
-            this.setStatus("")
-            this.sendBtnTarget.disabled = false
-          }
-        }, 30000)
-      }
-
-      addMessage(role, content) {
-        const div = document.createElement("div")
-        div.className = `sidebar__message sidebar__message--${role}`
-        div.textContent = content
-        this.messagesTarget.appendChild(div)
-        this.messagesTarget.scrollTop = this.messagesTarget.scrollHeight
-      }
-
-      setStatus(text) {
-        if (this.hasStatusTarget) {
-          this.statusTarget.textContent = text
         }
       }
     }
@@ -313,34 +242,10 @@ after_bundle do
     .app-frame { width: 100%; max-width: 640px; height: 400px; border: 2px dashed #ccc; border-radius: 12px; display: flex; align-items: center; justify-content: center; background: white; transition: border-color 0.3s ease; }
     .app-frame__label { font-size: 24px; color: #bbb; font-weight: 300; letter-spacing: 1px; }
 
-    /* Chat Bar */
-    .chat-bar { display: flex; gap: 10px; width: 100%; max-width: 640px; margin-top: 20px; transition: opacity 0.3s ease, transform 0.3s ease; }
-    .chat-bar--hidden { opacity: 0; pointer-events: none; transform: translateY(10px); }
-    .chat-bar__input { flex: 1; padding: 14px 18px; border: 2px solid #ddd; border-radius: 28px; font-size: 16px; outline: none; background: white; transition: border-color 0.2s ease; }
-    .chat-bar__input:focus { border-color: #007bff; }
-    .chat-bar__send { padding: 14px 24px; background: #007bff; color: white; border: none; border-radius: 28px; font-size: 16px; cursor: pointer; font-weight: 500; transition: background 0.2s ease; }
-    .chat-bar__send:hover { background: #0056b3; }
-    .chat-bar__send:disabled { background: #6c757d; cursor: not-allowed; }
-
     /* No Plugin Notice */
     .no-plugin { display: none; text-align: center; margin-top: 20px; color: #888; font-size: 14px; }
     .no-plugin__hint { margin-top: 6px; }
     .no-plugin__hint a { color: #007bff; }
-
-    /* Right Sidebar */
-    .sidebar { position: fixed; top: 56px; right: 0; width: 380px; height: calc(100vh - 56px); background: white; box-shadow: -4px 0 20px rgba(0,0,0,0.1); transform: translateX(100%); transition: transform 0.3s ease; display: flex; flex-direction: column; z-index: 100; }
-    .sidebar--peek { transform: translateX(70%); }
-    .sidebar--open { transform: translateX(0); }
-    .sidebar__header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; }
-    .sidebar__title { font-size: 16px; font-weight: 600; color: #1a1a2e; }
-    .sidebar__close { background: none; border: none; font-size: 24px; color: #999; cursor: pointer; line-height: 1; }
-    .sidebar__close:hover { color: #333; }
-    .sidebar__messages { flex: 1; overflow-y: auto; padding: 16px 20px; }
-    .sidebar__message { margin-bottom: 12px; padding: 10px 14px; border-radius: 12px; max-width: 90%; font-size: 14px; line-height: 1.5; word-wrap: break-word; }
-    .sidebar__message--user { background: #007bff; color: white; margin-left: auto; border-bottom-right-radius: 4px; }
-    .sidebar__message--assistant { background: #f0f2f5; color: #333; border-bottom-left-radius: 4px; }
-    .sidebar__message--system { background: transparent; color: #999; text-align: center; font-size: 13px; font-style: italic; }
-    .sidebar__status { padding: 8px 20px; font-size: 13px; color: #999; min-height: 32px; }
   CSS
 
   say ""
