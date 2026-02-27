@@ -22,7 +22,7 @@ gem "bcrypt", "~> 3.1"
 initializer "vv_rails.rb", <<~RUBY
   Vv::Rails.configure do |config|
     config.channel_prefix = "vv"
-    # config.cable_url = "ws://localhost:3000/cable"
+    config.cable_url = ENV.fetch("VV_CABLE_URL", "ws://localhost:3001/cable")
     # config.authenticate = ->(params) { User.find_by(token: params[:token]) }
   end
 
@@ -32,6 +32,15 @@ initializer "vv_rails.rb", <<~RUBY
 RUBY
 
 after_bundle do
+  # Allow browser extensions to connect via ActionCable (origin: chrome-extension://...)
+  environment <<~RUBY, env: :development
+    config.action_cable.disable_request_forgery_protection = true
+  RUBY
+
+  environment <<~RUBY, env: :production
+    config.action_cable.disable_request_forgery_protection = true
+  RUBY
+
   # --- Vv logo ---
   logo_src = File.join(File.dirname(__FILE__), "vv-logo.png")
   copy_file logo_src, "public/vv-logo.png" if File.exist?(logo_src)

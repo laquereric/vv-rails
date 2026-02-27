@@ -23,6 +23,7 @@ gem "rails_event_store"
 initializer "vv_rails.rb", <<~RUBY
   Vv::Rails.configure do |config|
     config.channel_prefix = "vv"
+    config.cable_url = ENV.fetch("VV_CABLE_URL", "ws://localhost:3003/cable")
   end
 
   Rails.configuration.to_prepare do
@@ -696,6 +697,11 @@ after_bundle do
     production:
       adapter: async
   YAML
+
+  # Allow browser extensions to connect via ActionCable (origin: chrome-extension://...)
+  environment <<~RUBY, env: :development
+    config.action_cable.disable_request_forgery_protection = true
+  RUBY
 
   environment <<~RUBY, env: :production
     config.action_cable.disable_request_forgery_protection = true
