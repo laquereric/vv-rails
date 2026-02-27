@@ -1,8 +1,8 @@
 # vv-rails host template
 #
 # Generates an API backend that relays LLM traffic to upstream providers,
-# stores sessions and context in SQLite, and serves as a multi-device
-# Action Cable hub for Vv-connected applications.
+# stores sessions, messages, turns, and presets in SQLite, and serves as
+# a multi-device Action Cable hub for Vv-connected applications.
 #
 # Usage:
 #   rails new myapp -m vendor/vv-rails/templates/host.rb
@@ -37,10 +37,18 @@ after_bundle do
       post "auth/token", to: "auth#token"
 
       resources :sessions, only: [:index, :show, :create, :destroy] do
-        resources :contexts, only: [:index, :create], controller: "contexts"
+        resources :messages, only: [:index, :create]
+        resources :turns, only: [:index, :show]
       end
 
-      resources :providers, only: [:index, :create, :update]
+      resources :providers, only: [:index, :show, :create, :update] do
+        resources :models, only: [:index, :create, :update]
+      end
+
+      resources :models, only: [:index, :show] do
+        resources :presets, only: [:index, :create, :update, :destroy]
+      end
+
       post "relay", to: "relay#create"
     end
   RUBY
@@ -98,18 +106,21 @@ after_bundle do
 
   # --- Migrations ---
 
-  generate "migration", "CreateSessions user_token:string title:string metadata:json"
-  generate "migration", "CreateContexts session:references role:string content:text metadata:json"
-  generate "migration", "CreateProviders name:string api_base:string api_key_ciphertext:string models:json priority:integer active:boolean"
+  generate "migration", "CreateSessions title:string metadata:json"
+  generate "migration", "CreateProviders name:string api_base:string api_key_ciphertext:string priority:integer active:boolean requires_api_key:boolean"
+  generate "migration", "CreateModels provider:references name:string api_model_id:string context_window:integer capabilities:json active:boolean"
+  generate "migration", "CreatePresets model:references name:string temperature:float max_tokens:integer system_prompt:text top_p:float parameters:json active:boolean"
+  generate "migration", "CreateMessages session:references role:string message_type:string content:text metadata:json"
+  generate "migration", "CreateTurns session:references model:references preset:references message_history:json request:text completion:text input_tokens:integer output_tokens:integer duration_ms:integer"
   generate "migration", "CreateApiTokens token_digest:string:index label:string expires_at:datetime"
 
   # --- Models ---
 
   file "app/models/session.rb", <<~RUBY
     class Session < ApplicationRecord
-      has_many :contexts, -> { order(:created_at) }, dependent: :destroy
+      has_many :messages, -> { order(:created_at) }, dependent: :destroy
+      has_many :turns, -> { order(:created_at) }, dependent: :destroy
 
-      validates :user_token, presence: true
       validates :title, presence: true
 
       def as_json(options = {})
@@ -118,17 +129,10 @@ after_bundle do
     end
   RUBY
 
-  file "app/models/context.rb", <<~RUBY
-    class Context < ApplicationRecord
-      belongs_to :session
-
-      validates :role, inclusion: { in: %w[user assistant system] }
-      validates :content, presence: true
-    end
-  RUBY
-
   file "app/models/provider.rb", <<~RUBY
     class Provider < ApplicationRecord
+      has_many :models, dependent: :destroy
+
       validates :name, presence: true, uniqueness: true
       validates :api_base, presence: true
       validates :priority, numericality: { only_integer: true }, allow_nil: true
@@ -136,8 +140,80 @@ after_bundle do
       scope :active, -> { where(active: true) }
       scope :by_priority, -> { order(priority: :asc) }
 
-      def models_list
-        models || []
+      def requires_key?
+        requires_api_key != false
+      end
+    end
+  RUBY
+
+  file "app/models/model.rb", <<~RUBY
+    class Model < ApplicationRecord
+      belongs_to :provider
+      has_many :presets, dependent: :destroy
+      has_many :turns
+
+      validates :name, presence: true
+      validates :api_model_id, presence: true
+      validates :api_model_id, uniqueness: { scope: :provider_id }
+
+      scope :active, -> { where(active: true) }
+
+      def capabilities_list
+        capabilities || {}
+      end
+
+      def supports?(capability)
+        capabilities_list[capability.to_s] == true
+      end
+    end
+  RUBY
+
+  file "app/models/preset.rb", <<~RUBY
+    class Preset < ApplicationRecord
+      belongs_to :model
+
+      validates :name, presence: true
+      validates :name, uniqueness: { scope: :model_id }
+      validates :temperature, numericality: { greater_than_or_equal_to: 0, less_than_or_equal_to: 2 }, allow_nil: true
+      validates :top_p, numericality: { greater_than_or_equal_to: 0, less_than_or_equal_to: 1 }, allow_nil: true
+      validates :max_tokens, numericality: { only_integer: true, greater_than: 0 }, allow_nil: true
+
+      scope :active, -> { where(active: true) }
+
+      def to_inference_params
+        params = {}
+        params[:temperature] = temperature if temperature
+        params[:max_tokens] = max_tokens if max_tokens
+        params[:top_p] = top_p if top_p
+        params.merge((parameters || {}).symbolize_keys)
+      end
+    end
+  RUBY
+
+  file "app/models/message.rb", <<~RUBY
+    class Message < ApplicationRecord
+      belongs_to :session
+
+      ROLES = %w[user assistant system].freeze
+      MESSAGE_TYPES = %w[user_input navigation data_query form_state].freeze
+
+      validates :role, inclusion: { in: ROLES }
+      validates :message_type, inclusion: { in: MESSAGE_TYPES }
+      validates :content, presence: true
+    end
+  RUBY
+
+  file "app/models/turn.rb", <<~RUBY
+    class Turn < ApplicationRecord
+      belongs_to :session
+      belongs_to :model
+      belongs_to :preset, optional: true
+
+      validates :message_history, presence: true
+      validates :request, presence: true
+
+      def token_count
+        (input_tokens || 0) + (output_tokens || 0)
       end
     end
   RUBY
@@ -178,10 +254,6 @@ after_bundle do
             render json: { error: "Unauthorized" }, status: :unauthorized
           end
         end
-
-        def current_user_token
-          request.headers["X-User-Token"]
-        end
       end
     end
   RUBY
@@ -209,17 +281,17 @@ after_bundle do
     module Api
       class SessionsController < BaseController
         def index
-          sessions = Session.where(user_token: current_user_token).order(updated_at: :desc)
+          sessions = Session.order(updated_at: :desc)
           render json: sessions
         end
 
         def show
-          session = Session.includes(:contexts).find(params[:id])
-          render json: session.as_json(include: :contexts)
+          session = Session.includes(:messages, :turns).find(params[:id])
+          render json: session.as_json(include: [:messages, :turns])
         end
 
         def create
-          session = Session.new(session_params.merge(user_token: current_user_token))
+          session = Session.new(session_params)
           if session.save
             render json: session, status: :created
           else
@@ -242,39 +314,58 @@ after_bundle do
     end
   RUBY
 
-  # --- Contexts controller ---
+  # --- Messages controller ---
 
-  file "app/controllers/api/contexts_controller.rb", <<~RUBY
+  file "app/controllers/api/messages_controller.rb", <<~RUBY
     module Api
-      class ContextsController < BaseController
+      class MessagesController < BaseController
         def index
           session = Session.find(params[:session_id])
-          render json: session.contexts
+          render json: session.messages
         end
 
         def create
           session = Session.find(params[:session_id])
-          context = session.contexts.build(context_params)
-          if context.save
-            broadcast_context(session, context)
-            render json: context, status: :created
+          message = session.messages.build(message_params)
+          if message.save
+            broadcast_message(session, message)
+            render json: message, status: :created
           else
-            render json: { errors: context.errors.full_messages }, status: :unprocessable_entity
+            render json: { errors: message.errors.full_messages }, status: :unprocessable_entity
           end
         end
 
         private
 
-        def context_params
-          params.require(:context).permit(:role, :content, metadata: {})
+        def message_params
+          params.require(:message).permit(:role, :message_type, :content, metadata: {})
         end
 
-        def broadcast_context(session, context)
+        def broadcast_message(session, message)
           prefix = Vv::Rails.configuration.channel_prefix
           ActionCable.server.broadcast(
             "\#{prefix}:session:\#{session.id}",
-            { event: "context:new", data: context.as_json }
+            { event: "message:new", data: message.as_json }
           )
+        end
+      end
+    end
+  RUBY
+
+  # --- Turns controller (read-only — turns created by relay) ---
+
+  file "app/controllers/api/turns_controller.rb", <<~RUBY
+    module Api
+      class TurnsController < BaseController
+        def index
+          session = Session.find(params[:session_id])
+          render json: session.turns.as_json(include: [:model, :preset])
+        end
+
+        def show
+          session = Session.find(params[:session_id])
+          turn = session.turns.find(params[:id])
+          render json: turn.as_json(include: [:model, :preset])
         end
       end
     end
@@ -287,7 +378,12 @@ after_bundle do
       class ProvidersController < BaseController
         def index
           providers = Provider.active.by_priority
-          render json: providers.as_json(except: :api_key_ciphertext)
+          render json: providers.as_json(except: :api_key_ciphertext, include: :models)
+        end
+
+        def show
+          provider = Provider.find(params[:id])
+          render json: provider.as_json(except: :api_key_ciphertext, include: { models: { include: :presets } })
         end
 
         def create
@@ -311,7 +407,98 @@ after_bundle do
         private
 
         def provider_params
-          params.require(:provider).permit(:name, :api_base, :api_key_ciphertext, :priority, :active, models: [])
+          params.require(:provider).permit(:name, :api_base, :api_key_ciphertext, :priority, :active, :requires_api_key)
+        end
+      end
+    end
+  RUBY
+
+  # --- Models controller ---
+
+  file "app/controllers/api/models_controller.rb", <<~RUBY
+    module Api
+      class ModelsController < BaseController
+        def index
+          models = if params[:provider_id]
+            Provider.find(params[:provider_id]).models.active
+          else
+            Model.active.includes(:provider)
+          end
+          render json: models.as_json(include: :provider)
+        end
+
+        def show
+          model = Model.find(params[:id])
+          render json: model.as_json(include: [:provider, :presets])
+        end
+
+        def create
+          provider = Provider.find(params[:provider_id])
+          model = provider.models.build(model_params)
+          if model.save
+            render json: model, status: :created
+          else
+            render json: { errors: model.errors.full_messages }, status: :unprocessable_entity
+          end
+        end
+
+        def update
+          model = Model.find(params[:id])
+          if model.update(model_params)
+            render json: model
+          else
+            render json: { errors: model.errors.full_messages }, status: :unprocessable_entity
+          end
+        end
+
+        private
+
+        def model_params
+          params.require(:model).permit(:name, :api_model_id, :context_window, :active, capabilities: {})
+        end
+      end
+    end
+  RUBY
+
+  # --- Presets controller ---
+
+  file "app/controllers/api/presets_controller.rb", <<~RUBY
+    module Api
+      class PresetsController < BaseController
+        def index
+          model = Model.find(params[:model_id])
+          render json: model.presets.active
+        end
+
+        def create
+          model = Model.find(params[:model_id])
+          preset = model.presets.build(preset_params)
+          if preset.save
+            render json: preset, status: :created
+          else
+            render json: { errors: preset.errors.full_messages }, status: :unprocessable_entity
+          end
+        end
+
+        def update
+          preset = Preset.find(params[:id])
+          if preset.update(preset_params)
+            render json: preset
+          else
+            render json: { errors: preset.errors.full_messages }, status: :unprocessable_entity
+          end
+        end
+
+        def destroy
+          preset = Preset.find(params[:id])
+          preset.destroy
+          head :no_content
+        end
+
+        private
+
+        def preset_params
+          params.require(:preset).permit(:name, :temperature, :max_tokens, :system_prompt, :top_p, :active, parameters: {})
         end
       end
     end
@@ -323,29 +510,51 @@ after_bundle do
     module Api
       class RelayController < BaseController
         def create
-          provider = find_provider
-          unless provider
-            render json: { error: "No active provider available" }, status: :service_unavailable
+          model = find_model
+          unless model
+            render json: { error: "No active model available" }, status: :service_unavailable
             return
           end
 
+          preset = params[:preset_id] ? Preset.find(params[:preset_id]) : nil
+          session = params[:session_id] ? Session.find(params[:session_id]) : nil
+
+          # Build message history snapshot from session messages
+          message_history = session ? session.messages.order(:created_at).as_json(only: [:role, :message_type, :content]) : []
+
+          # Create turn record
+          turn = Turn.new(
+            session: session,
+            model: model,
+            preset: preset,
+            message_history: message_history,
+            request: params[:content]
+          )
+
           # Forward the request to the upstream provider
           # This is a scaffold — implement HTTP client calls per provider API
+          turn.completion = "Implement provider-specific HTTP relay in Api::RelayController#create"
+          turn.save!
+
           render json: {
-            provider: provider.name,
-            model: params[:model],
+            turn_id: turn.id,
+            provider: model.provider.name,
+            model: model.api_model_id,
+            preset: preset&.name,
             status: "relay_stub",
-            message: "Implement provider-specific HTTP relay in Api::RelayController#create"
+            message: turn.completion
           }
         end
 
         private
 
-        def find_provider
-          if params[:provider].present?
-            Provider.active.find_by(name: params[:provider])
+        def find_model
+          if params[:model_id].present?
+            Model.active.find_by(id: params[:model_id])
+          elsif params[:model].present?
+            Model.active.find_by(api_model_id: params[:model])
           else
-            Provider.active.by_priority.first
+            Model.active.joins(:provider).merge(Provider.active.by_priority).first
           end
         end
       end
@@ -393,25 +602,84 @@ after_bundle do
     end
   RUBY
 
-  # --- Seeds with a default provider ---
+  # --- Seeds with providers, models, and presets ---
 
   append_to_file "db/seeds.rb", <<~RUBY
 
-    # Default provider (update with real API key)
-    Provider.find_or_create_by!(name: "OpenAI") do |p|
+    # --- OpenAI ---
+    openai = Provider.find_or_create_by!(name: "OpenAI") do |p|
       p.api_base = "https://api.openai.com/v1"
       p.api_key_ciphertext = "sk-placeholder"
-      p.models = ["gpt-4o", "gpt-4o-mini"]
       p.priority = 1
+      p.active = true
+      p.requires_api_key = true
+    end
+
+    gpt4o = openai.models.find_or_create_by!(api_model_id: "gpt-4o") do |m|
+      m.name = "GPT-4o"
+      m.context_window = 128_000
+      m.capabilities = { "vision" => true, "function_calling" => true, "streaming" => true }
+      m.active = true
+    end
+
+    gpt4o.presets.find_or_create_by!(name: "default") do |p|
+      p.temperature = 0.7
+      p.max_tokens = 4096
+      p.system_prompt = "You are a helpful assistant."
       p.active = true
     end
 
-    Provider.find_or_create_by!(name: "Anthropic") do |p|
+    openai.models.find_or_create_by!(api_model_id: "gpt-4o-mini") do |m|
+      m.name = "GPT-4o Mini"
+      m.context_window = 128_000
+      m.capabilities = { "function_calling" => true, "streaming" => true }
+      m.active = true
+    end
+
+    # --- Anthropic ---
+    anthropic = Provider.find_or_create_by!(name: "Anthropic") do |p|
       p.api_base = "https://api.anthropic.com/v1"
       p.api_key_ciphertext = "sk-ant-placeholder"
-      p.models = ["claude-sonnet-4-6", "claude-haiku-4-5"]
       p.priority = 2
       p.active = true
+      p.requires_api_key = true
+    end
+
+    claude_sonnet = anthropic.models.find_or_create_by!(api_model_id: "claude-sonnet-4-6") do |m|
+      m.name = "Claude Sonnet 4.6"
+      m.context_window = 200_000
+      m.capabilities = { "vision" => true, "streaming" => true }
+      m.active = true
+    end
+
+    claude_sonnet.presets.find_or_create_by!(name: "default") do |p|
+      p.temperature = 0.7
+      p.max_tokens = 4096
+      p.system_prompt = "You are a helpful assistant."
+      p.active = true
+    end
+
+    anthropic.models.find_or_create_by!(api_model_id: "claude-haiku-4-5") do |m|
+      m.name = "Claude Haiku 4.5"
+      m.context_window = 200_000
+      m.capabilities = { "streaming" => true }
+      m.active = true
+    end
+
+    # --- Ollama (local, no API key) ---
+    ollama = Provider.find_or_create_by!(name: "Ollama") do |p|
+      p.api_base = "http://localhost:11434"
+      p.api_key_ciphertext = nil
+      p.priority = 3
+      p.active = false
+      p.requires_api_key = false
+    end
+
+    ollama.models.find_or_create_by!(api_model_id: "llama3.1") do |m|
+      m.name = "Llama 3.1"
+      m.context_window = 128_000
+      m.capabilities = { "streaming" => true }
+      m.active = true
     end
   RUBY
 
@@ -420,6 +688,11 @@ after_bundle do
   say "  API base:      /api"
   say "  Auth:          POST /api/auth/token"
   say "  Sessions:      /api/sessions"
+  say "  Messages:      /api/sessions/:id/messages"
+  say "  Turns:         /api/sessions/:id/turns"
+  say "  Providers:     /api/providers"
+  say "  Models:        /api/models"
+  say "  Presets:       /api/models/:id/presets"
   say "  Relay:         POST /api/relay"
   say "  Plugin config: GET /vv/config.json"
   say ""

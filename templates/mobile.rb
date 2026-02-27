@@ -303,7 +303,7 @@ after_bundle do
       }
 
       handleReceived(data) {
-        if (data.event === "context:new") {
+        if (data.event === "message:new") {
           const chatController = this.element.querySelector("[data-controller~=chat]")
           if (chatController) {
             chatController.dispatchEvent(new CustomEvent("chat:receiveMessage", {
