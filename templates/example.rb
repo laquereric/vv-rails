@@ -476,6 +476,40 @@ initializer "vv_rails.rb", <<~RUBY
       end
     end
   end
+
+  # --- Model discovery: browser reports available models ---
+
+  Vv::Rails::EventBus.on("model:discovery:report") do |data, context|
+    category = data["category"] || "unknown"
+    discovered = data["models"] || []
+    correlation_id = data["correlationId"]
+
+    Vv::BrowserManager::ModelDiscovery.report(
+      correlation_id: correlation_id,
+      category: category,
+      models: discovered.map { |m| m.symbolize_keys }
+    )
+
+    Rails.logger.info("[Vv] Model discovery: \#{discovered.size} \#{category} models reported")
+  end
+
+  # --- LlmServer completion: browser returns inference result ---
+
+  Vv::Rails::EventBus.on("llm:complete") do |data, context|
+    correlation_id = data["correlationId"]
+    content = data["content"]
+    model = data["model"]
+    tokens = data["tokens"]
+
+    if correlation_id && content
+      Vv::BrowserManager::LlmServer.complete(
+        correlation_id: correlation_id,
+        content: content,
+        model: model,
+        tokens: tokens
+      )
+    end
+  end
 RUBY
 
 after_bundle do
