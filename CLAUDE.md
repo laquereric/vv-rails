@@ -18,12 +18,49 @@ Rails engine gem providing server-side Vv integration via Action Cable.
 
 ## Templates
 
-| Template | Generates |
-|----------|-----------|
-| `templates/example.rb` | Browser LLM chat demo (port 3003) |
-| `templates/host.rb` | LLM relay API backend (port 3001) |
-| `templates/mobile.rb` | Mobile-optimized chat PWA (port 3002) |
-| `templates/platform_manager.rb` | Dev dashboard (port 3000) |
+| Template | Generates | Has DB |
+|----------|-----------|--------|
+| `templates/host.rb` | LLM relay API backend (port 3001) | Yes — full schema + ApiToken auth |
+| `templates/example.rb` | Browser LLM chat demo (port 3003) | Yes — same schema, no ApiToken |
+| `templates/mobile.rb` | Mobile-optimized chat PWA (port 3002) | No — thin client, talks to Host |
+| `templates/platform_manager.rb` | Dev dashboard (port 3000) | Yes — HostInstance only |
+
+## Schema (host.rb + example.rb)
+
+```
+Provider  1 ──→ N  Model  1 ──→ N  Preset
+                      │                │ (optional)
+                      ▼                ▼
+Session   1 ──→ N  Turn ────────────────→ Model + Preset
+          1 ──→ N  Message
+```
+
+| Table | Purpose |
+|-------|---------|
+| `providers` | LLM vendor: name, api_base, encrypted api_key, requires_api_key, priority |
+| `models` | Per-provider model: api_model_id, context_window, capabilities (json) |
+| `presets` | Named inference params: temperature, max_tokens, system_prompt, top_p, parameters (json) |
+| `sessions` | Groups messages and turns |
+| `messages` | Context entries: role (user/assistant/system), message_type (user_input/navigation/data_query/form_state) |
+| `turns` | One LLM request/response: model, preset, message_history snapshot (json), request, completion, token counts |
+| `api_tokens` | Host only — Bearer token auth via BCrypt |
+
+## Architecture pattern
+
+Extends classic Rails form lifecycle (render → submit → validate → respond) with an ActionCable middle phase where the server observes the form being filled and accumulates context.
+
+```
+CLASSIC:  GET /new → render ──────────────────→ POST /create → validate → redirect
+                              (server blind)
+
+VV:       GET /    → render ── typing ─ typing → submit → LLM validate → result
+                               Messages build    Turn captures request/completion
+                               context live       message_history snapshot preserved
+```
+
+**Form submit sequence:** `GET /` renders form → `chat:typing` persists form_state Messages → `form:submit` creates Turn with message_history snapshot → `llm:request` sent to plugin/provider → `llm:response` completes Turn → `form:submit:result` pushed to client.
+
+**Complexity stays in Host/EventBus.** Client fires simple events. Server handles session lookup, message persistence, model selection, prompt assembly, turn tracking, result dispatch.
 
 ## VvChannel API
 
