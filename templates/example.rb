@@ -4,6 +4,8 @@
 # Without plugin: displays an empty app frame with "Your App Here".
 # With plugin: tells the plugin to show its Shadow DOM chat UI and
 # routes chat messages through ActionCable via the Rails EventBus.
+# Persists Messages, Turns, and form state in SQLite via the same
+# schema as host.rb (Session → Message, Turn → Model, Preset).
 #
 # Usage:
 #   rails new myapp -m vendor/vv-rails/templates/example.rb
@@ -20,10 +22,38 @@ initializer "vv_rails.rb", <<~RUBY
     config.channel_prefix = "vv"
   end
 
+  # --- Helper: find or create session for this channel ---
+
+  def self.vv_session_for(channel)
+    page_id = channel.params["page_id"] || "example"
+    Session.find_or_create_by!(title: "example:\#{page_id}") do |s|
+      s.metadata = { page_id: page_id }
+    end
+  end
+
+  def self.vv_model
+    Model.find_by(api_model_id: "webllm-default") || Model.first
+  end
+
+  def self.vv_preset
+    vv_model&.presets&.find_by(name: "default")
+  end
+
+  # --- EventBus handlers ---
+
   Vv::Rails::EventBus.on("chat:typing") do |data, context|
     channel = context[:channel]
+    session = vv_session_for(channel)
     page_content = data["pageContent"] || {}
     form_fields = page_content["formFields"] || {}
+
+    # Persist form state as a message
+    session.messages.create!(
+      role: "user",
+      message_type: "form_state",
+      content: form_fields.to_json,
+      metadata: { event: "chat:typing" }
+    )
 
     # Build a human-readable summary of form state
     field_summary = form_fields.map do |name, info|
@@ -58,9 +88,19 @@ initializer "vv_rails.rb", <<~RUBY
   end
 
   Vv::Rails::EventBus.on("chat") do |data, context|
-    # No echo — the plugin routes chat to the LLM directly.
-    # This handler is available for app-level hooks (logging, persistence, etc.)
-    Rails.logger.info "[vv] chat received: \#{data['content']&.truncate(80)}"
+    channel = context[:channel]
+    session = vv_session_for(channel)
+
+    # Persist chat message
+    role = data["role"] || "user"
+    session.messages.create!(
+      role: role,
+      message_type: "user_input",
+      content: data["content"].to_s,
+      metadata: { event: "chat" }
+    )
+
+    Rails.logger.info "[vv] chat persisted: \#{data['content']&.truncate(80)}"
   end
 
   # --- Form submit: easter egg detection + LLM validation ---
@@ -69,9 +109,18 @@ initializer "vv_rails.rb", <<~RUBY
 
   Vv::Rails::EventBus.on("form:submit") do |data, context|
     channel = context[:channel]
+    session = vv_session_for(channel)
     fields = data["fields"] || {}
     current_user = data["currentUser"] || "Unknown"
     form_title = data["formTitle"] || "Form"
+
+    # Persist form submission as a message
+    session.messages.create!(
+      role: "user",
+      message_type: "form_state",
+      content: fields.to_json,
+      metadata: { event: "form:submit", form_title: form_title, current_user: current_user }
+    )
 
     # Check for easter egg
     epu_value = fields.dig("e_pluribus_unum", "value").to_s
@@ -152,6 +201,20 @@ initializer "vv_rails.rb", <<~RUBY
         </div>
       HTML
 
+      # Persist easter egg as a Turn with immediate completion
+      model = vv_model
+      if model
+        message_history = session.messages.order(:created_at).as_json(only: [:role, :message_type, :content])
+        Turn.create!(
+          session: session,
+          model: model,
+          preset: vv_preset,
+          message_history: message_history,
+          request: "easter_egg",
+          completion: "Easter egg found by \#{first_name} \#{last_name}"
+        )
+      end
+
       channel.emit("sidebar:open", {})
       channel.emit("sidebar:message", { html: easter_egg_html })
       channel.emit("form:submit:result", { ok: true, answer: "egg", explanation: "" })
@@ -177,7 +240,20 @@ initializer "vv_rails.rb", <<~RUBY
       }
     ]
 
-    form_validations[request_id] = { channel: channel, data: data }
+    # Create Turn (pending completion — will be filled on llm:response)
+    model = vv_model
+    message_history = session.messages.order(:created_at).as_json(only: [:role, :message_type, :content])
+    turn = if model
+      Turn.create!(
+        session: session,
+        model: model,
+        preset: vv_preset,
+        message_history: message_history,
+        request: messages.to_json
+      )
+    end
+
+    form_validations[request_id] = { channel: channel, data: data, session: session, turn: turn }
     channel.emit("llm:request", {
       requestId: request_id,
       messages: messages,
@@ -191,7 +267,24 @@ initializer "vv_rails.rb", <<~RUBY
     next unless pending
 
     channel = pending[:channel]
+    session = pending[:session]
+    turn = pending[:turn]
     raw = data["response"].to_s
+
+    # Complete the Turn with the LLM response
+    if turn
+      turn.update!(completion: raw)
+    end
+
+    # Persist assistant response as a message
+    if session
+      session.messages.create!(
+        role: "assistant",
+        message_type: "user_input",
+        content: raw,
+        metadata: { event: "llm:response", request_id: request_id }
+      )
+    end
 
     # Parse JSON from response (may be wrapped in markdown code block)
     parsed = begin
@@ -218,6 +311,120 @@ after_bundle do
   # --- Vv logo ---
   logo_src = File.join(File.dirname(__FILE__), "vv-logo.png")
   copy_file logo_src, "public/vv-logo.png" if File.exist?(logo_src)
+
+  # --- Migrations (same schema as host.rb) ---
+
+  generate "migration", "CreateSessions title:string metadata:json"
+  generate "migration", "CreateProviders name:string api_base:string api_key_ciphertext:string priority:integer active:boolean requires_api_key:boolean"
+  generate "migration", "CreateModels provider:references name:string api_model_id:string context_window:integer capabilities:json active:boolean"
+  generate "migration", "CreatePresets model:references name:string temperature:float max_tokens:integer system_prompt:text top_p:float parameters:json active:boolean"
+  generate "migration", "CreateMessages session:references role:string message_type:string content:text metadata:json"
+  generate "migration", "CreateTurns session:references model:references preset:references message_history:json request:text completion:text input_tokens:integer output_tokens:integer duration_ms:integer"
+
+  # --- Models ---
+
+  file "app/models/session.rb", <<~RUBY
+    class Session < ApplicationRecord
+      has_many :messages, -> { order(:created_at) }, dependent: :destroy
+      has_many :turns, -> { order(:created_at) }, dependent: :destroy
+
+      validates :title, presence: true
+    end
+  RUBY
+
+  file "app/models/provider.rb", <<~RUBY
+    class Provider < ApplicationRecord
+      has_many :models, dependent: :destroy
+
+      validates :name, presence: true, uniqueness: true
+      validates :api_base, presence: true
+
+      scope :active, -> { where(active: true) }
+      scope :by_priority, -> { order(priority: :asc) }
+    end
+  RUBY
+
+  file "app/models/model.rb", <<~RUBY
+    class Model < ApplicationRecord
+      belongs_to :provider
+      has_many :presets, dependent: :destroy
+      has_many :turns
+
+      validates :name, presence: true
+      validates :api_model_id, presence: true
+
+      scope :active, -> { where(active: true) }
+    end
+  RUBY
+
+  file "app/models/preset.rb", <<~RUBY
+    class Preset < ApplicationRecord
+      belongs_to :model
+
+      validates :name, presence: true
+
+      scope :active, -> { where(active: true) }
+
+      def to_inference_params
+        params = {}
+        params[:temperature] = temperature if temperature
+        params[:max_tokens] = max_tokens if max_tokens
+        params[:top_p] = top_p if top_p
+        params.merge((parameters || {}).symbolize_keys)
+      end
+    end
+  RUBY
+
+  file "app/models/message.rb", <<~RUBY
+    class Message < ApplicationRecord
+      belongs_to :session
+
+      ROLES = %w[user assistant system].freeze
+      MESSAGE_TYPES = %w[user_input navigation data_query form_state].freeze
+
+      validates :role, inclusion: { in: ROLES }
+      validates :message_type, inclusion: { in: MESSAGE_TYPES }
+      validates :content, presence: true
+    end
+  RUBY
+
+  file "app/models/turn.rb", <<~RUBY
+    class Turn < ApplicationRecord
+      belongs_to :session
+      belongs_to :model
+      belongs_to :preset, optional: true
+
+      validates :message_history, presence: true
+      validates :request, presence: true
+    end
+  RUBY
+
+  # --- Seeds: WebLLM provider (client-side, no API key) ---
+
+  append_to_file "db/seeds.rb", <<~RUBY
+
+    webllm = Provider.find_or_create_by!(name: "WebLLM") do |p|
+      p.api_base = "client://webgpu"
+      p.api_key_ciphertext = nil
+      p.priority = 1
+      p.active = true
+      p.requires_api_key = false
+    end
+
+    model = webllm.models.find_or_create_by!(api_model_id: "webllm-default") do |m|
+      m.name = "WebLLM (Browser)"
+      m.context_window = 4096
+      m.capabilities = { "streaming" => true }
+      m.active = true
+    end
+
+    model.presets.find_or_create_by!(name: "default") do |p|
+      p.temperature = 0.3
+      p.max_tokens = 256
+      p.system_prompt = "You are a helpful form validation assistant."
+      p.active = true
+    end
+  RUBY
 
   # --- Action Cable base classes (required by vv-rails engine VvChannel) ---
 
@@ -534,9 +741,10 @@ after_bundle do
   say "  Plugin config: GET /vv/config.json"
   say ""
   say "Next steps:"
-  say "  1. Install the Vv Chrome Extension"
-  say "  2. rails server"
-  say "  3. Open http://localhost:3000"
+  say "  1. rails db:create db:migrate db:seed"
+  say "  2. Install the Vv Chrome Extension"
+  say "  3. rails server"
+  say "  4. Open http://localhost:3000"
   say "     - Without plugin: shows 'Your App Here' frame"
   say "     - With plugin: chat input appears, sidebar opens on send"
   say ""
