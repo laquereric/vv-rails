@@ -65,6 +65,19 @@ initializer "vv_rails.rb", <<~RUBY
       opened_at: Time.current.iso8601
     }))
 
+    # Precharge: warm up a model with form context so it's ready when user needs help
+    if Vv::BrowserManager.model_registry.available.any?
+      model = Vv::BrowserManager.model_registry.available.first
+      Vv::BrowserManager::PrechargeClient.precharge(
+        model_id: model.model_id,
+        category: model.category,
+        context: [
+          { role: "system", content: "You are a form assistant helping users fill out '\#{form_title}'." },
+          { role: "user", content: fields.to_json }
+        ]
+      )
+    end
+
     Rails.logger.info "[vv] form opened: \#{form_title} with \#{fields.keys.length} fields"
   end
 
@@ -509,6 +522,23 @@ initializer "vv_rails.rb", <<~RUBY
         tokens: tokens
       )
     end
+  end
+
+  # --- Precharge completion: browser reports model warm ---
+
+  Vv::Rails::EventBus.on("precharge:complete") do |data, context|
+    Vv::BrowserManager::PrechargeClient.complete(
+      correlation_id: data["correlationId"],
+      model_id: data["modelId"],
+      category: data["category"],
+      status: data["status"] || "ready",
+      context_tokens: data["contextTokens"],
+      load_time_ms: data["loadTimeMs"],
+      prefill_time_ms: data["prefillTimeMs"],
+      error: data["error"]
+    )
+
+    Rails.logger.info("[Vv] Precharge complete: \#{data["modelId"]} (\#{data["status"]})")
   end
 RUBY
 
