@@ -689,6 +689,212 @@ after_bundle do
     end
   RUBY
 
+  # --- Rake tasks: message timeline ---
+
+  file "lib/tasks/message_timeline.rake", <<~'RAKE'
+    namespace :message do
+      namespace :timeline do
+        desc "Display message timeline for a session (SESSION_ID=N, default: latest)"
+        task log: :environment do
+          session = find_session
+          puts "Session #{session.id}: #{session.title}"
+          puts "Created: #{session.created_at}"
+          puts "-" * 100
+
+          messages = session.messages.order(:created_at)
+          if messages.empty?
+            puts "  (no messages)"
+          else
+            messages.each do |msg|
+              ts = msg.created_at.strftime("%H:%M:%S.%L")
+              type = msg.message_type.ljust(12)
+              role = msg.role.ljust(9)
+              meta = format_metadata(msg)
+              content = msg.content.to_s.truncate(80)
+              puts "  #{ts}  [#{type}]  #{role}  #{content}"
+              puts "  #{' ' * 16}#{meta}" if meta.present?
+            end
+          end
+
+          puts ""
+          turns = session.turns.order(:created_at)
+          if turns.any?
+            puts "Turns (#{turns.count}):"
+            turns.each do |t|
+              provider = t.model.provider.name
+              model = t.model.name
+              preset = t.preset&.name || "none"
+              tokens = t.token_count
+              duration = t.duration_ms ? "#{t.duration_ms}ms" : "n/a"
+              puts "  Turn #{t.id}: #{provider}/#{model} | preset: #{preset} | tokens: #{tokens} | #{duration}"
+              puts "    request:    #{t.request.to_s.truncate(80)}"
+              puts "    completion: #{t.completion.to_s.truncate(80)}"
+              puts "    history:    #{t.message_history&.length || 0} messages"
+            end
+          end
+          puts ""
+        end
+
+        desc "Analyze message timeline patterns (SESSION_ID=N, default: latest)"
+        task analysis: :environment do
+          session = find_session
+          messages = session.messages.order(:created_at).to_a
+
+          if messages.empty?
+            puts "Session #{session.id}: no messages"
+            next
+          end
+
+          puts "Session #{session.id}: #{session.title}"
+          puts "=" * 80
+
+          # Duration
+          first_ts = messages.first.created_at
+          last_ts = messages.last.created_at
+          duration_s = (last_ts - first_ts).round(1)
+          puts "\nDuration: #{format_duration(duration_s)} (#{messages.length} messages, #{session.turns.count} turns)"
+
+          # Message type breakdown
+          puts "\nMessage types:"
+          messages.group_by(&:message_type).sort_by { |_, msgs| -msgs.length }.each do |type, msgs|
+            puts "  #{type.ljust(14)} #{msgs.length}"
+          end
+
+          # Form lifecycle
+          form_opens = messages.select { |m| m.message_type == "form_open" }
+          form_polls = messages.select { |m| m.message_type == "form_poll" }
+          form_states = messages.select { |m| m.message_type == "form_state" }
+          form_errors = messages.select { |m| m.message_type == "form_error" }
+          field_helps = messages.select { |m| m.message_type == "field_help" }
+
+          if form_opens.any?
+            puts "\nForm lifecycle:"
+            puts "  Opened:      #{form_opens.length} form(s)"
+            puts "  Poll count:  #{form_polls.length} (#{form_polls.length * 5}s of polling)"
+            puts "  State saves: #{form_states.length}"
+            puts "  Errors:      #{form_errors.length}"
+            puts "  Help reqs:   #{field_helps.length}"
+          end
+
+          # Pause detection (gaps > 10s between consecutive messages)
+          pauses = []
+          messages.each_cons(2) do |a, b|
+            gap = (b.created_at - a.created_at).round(1)
+            if gap > 10
+              pauses << { after: a, before: b, gap: gap }
+            end
+          end
+
+          if pauses.any?
+            puts "\nPauses (> 10s):"
+            pauses.each do |p|
+              after_field = p[:after].metadata&.dig("focused_field") || p[:after].message_type
+              before_field = p[:before].metadata&.dig("focused_field") || p[:before].message_type
+              puts "  #{format_duration(p[:gap])} pause between #{after_field} → #{before_field}"
+            end
+          end
+
+          # Field focus tracking (from form_poll focused_field metadata)
+          if form_polls.any?
+            focus_changes = []
+            prev_focus = nil
+            form_polls.each do |poll|
+              focused = poll.metadata&.dig("focused_field")
+              if focused && focused != prev_focus
+                focus_changes << { field: focused, at: poll.created_at }
+                prev_focus = focused
+              end
+            end
+
+            if focus_changes.any?
+              puts "\nField focus order:"
+              focus_changes.each_with_index do |fc, i|
+                duration_on_field = if i < focus_changes.length - 1
+                  (focus_changes[i + 1][:at] - fc[:at]).round(1)
+                else
+                  (last_ts - fc[:at]).round(1)
+                end
+                puts "  #{fc[:field].ljust(20)} #{format_duration(duration_on_field)}"
+              end
+            end
+          end
+
+          # Field help requests
+          if field_helps.any?
+            puts "\nField help requests:"
+            field_helps.each do |fh|
+              label = fh.metadata&.dig("field_label") || fh.content
+              puts "  ? #{label} at #{fh.created_at.strftime('%H:%M:%S')}"
+            end
+          end
+
+          # Error analysis
+          if form_errors.any?
+            puts "\nApplication validation errors:"
+            form_errors.each do |fe|
+              begin
+                errors = JSON.parse(fe.content)
+                errors.each do |field, msgs|
+                  puts "  #{field}: #{Array(msgs).join(', ')}"
+                end
+              rescue JSON::ParserError
+                puts "  #{fe.content.truncate(80)}"
+              end
+            end
+          end
+
+          # Turn summary
+          turns = session.turns.order(:created_at)
+          if turns.any?
+            puts "\nTurn summary:"
+            total_tokens = 0
+            total_duration = 0
+            turns.each do |t|
+              tokens = t.token_count
+              total_tokens += tokens
+              total_duration += (t.duration_ms || 0)
+              puts "  Turn #{t.id}: #{t.model.provider.name}/#{t.model.name} | #{tokens} tokens | #{t.duration_ms || 'n/a'}ms"
+            end
+            puts "  Total: #{total_tokens} tokens, #{total_duration}ms across #{turns.count} turns"
+          end
+
+          puts ""
+        end
+      end
+    end
+
+    def find_session
+      if ENV["SESSION_ID"].present?
+        Session.find(ENV["SESSION_ID"])
+      else
+        session = Session.order(:created_at).last
+        abort "No sessions found. Create one first." unless session
+        session
+      end
+    end
+
+    def format_metadata(msg)
+      return nil unless msg.metadata.present?
+      parts = []
+      m = msg.metadata
+      parts << "focused: #{m['focused_field']}" if m["focused_field"]
+      parts << "filled: #{m['fields_filled']}/#{m['fields_total']}" if m["fields_filled"]
+      parts << "form: #{m['form_title']}" if m["form_title"]
+      parts << "field: #{m['field_label']}" if m["field_label"]
+      parts.any? ? parts.join(" | ") : nil
+    end
+
+    def format_duration(seconds)
+      if seconds < 60
+        "#{seconds}s"
+      elsif seconds < 3600
+        "#{(seconds / 60).floor}m #{(seconds % 60).round}s"
+      else
+        "#{(seconds / 3600).floor}h #{((seconds % 3600) / 60).floor}m"
+      end
+    end
+  RAKE
+
   say ""
   say "vv-host app generated!", :green
   say "  API base:      /api"
