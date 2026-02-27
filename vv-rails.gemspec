@@ -21,4 +21,5 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency "railties",    ">= 7.0", "< 9"
   spec.add_dependency "actioncable", ">= 7.0", "< 9"
+  spec.add_dependency "rails_event_store", ">= 2.0", "< 3"
 end

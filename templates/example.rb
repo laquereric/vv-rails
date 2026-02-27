@@ -4,8 +4,8 @@
 # Without plugin: displays an empty app frame with "Your App Here".
 # With plugin: tells the plugin to show its Shadow DOM chat UI and
 # routes chat messages through ActionCable via the Rails EventBus.
-# Persists Messages, Turns, and form state in SQLite via the same
-# schema as host.rb (Session → Message, Turn → Model, Preset).
+# Persists form lifecycle events via Rails Event Store, Turns and
+# form state in SQLite via the same schema as host.rb.
 #
 # Usage:
 #   rails new myapp -m vendor/vv-rails/templates/example.rb
@@ -14,12 +14,17 @@
 # --- Gems ---
 
 gem "vv-rails", path: "vendor/vv-rails"
+gem "rails_event_store"
 
 # --- vv:install (inlined — creates initializer and mounts engine) ---
 
 initializer "vv_rails.rb", <<~RUBY
   Vv::Rails.configure do |config|
     config.channel_prefix = "vv"
+  end
+
+  Rails.configuration.to_prepare do
+    Rails.configuration.event_store = RailsEventStore::Client.new
   end
 
   # --- Helper: find or create session for this channel ---
@@ -39,6 +44,10 @@ initializer "vv_rails.rb", <<~RUBY
     vv_model&.presets&.find_by(name: "default")
   end
 
+  def self.vv_publish(session, event)
+    Rails.configuration.event_store.publish(event, stream_name: "session:\#{session.id}")
+  end
+
   # --- EventBus handlers ---
 
   Vv::Rails::EventBus.on("form:open") do |data, context|
@@ -47,12 +56,12 @@ initializer "vv_rails.rb", <<~RUBY
     form_title = data["formTitle"] || "Form"
     fields = data["fields"] || {}
 
-    session.messages.create!(
+    vv_publish(session, Vv::Rails::Events::FormOpened.new(data: {
       role: "system",
-      message_type: "form_open",
       content: fields.to_json,
-      metadata: { event: "form:open", form_title: form_title, opened_at: Time.current.iso8601 }
-    )
+      form_title: form_title,
+      opened_at: Time.current.iso8601
+    }))
 
     Rails.logger.info "[vv] form opened: \#{form_title} with \#{fields.keys.length} fields"
   end
@@ -63,24 +72,19 @@ initializer "vv_rails.rb", <<~RUBY
     fields = data["fields"] || {}
     form_title = data["formTitle"] || "Form"
 
-    # Build field completion summary
     filled = fields.count { |_, info| info["value"].to_s.strip.present? }
     total = fields.length
     focused = data["focusedField"]
 
-    session.messages.create!(
+    vv_publish(session, Vv::Rails::Events::FormPolled.new(data: {
       role: "system",
-      message_type: "form_poll",
       content: fields.to_json,
-      metadata: {
-        event: "form:poll",
-        form_title: form_title,
-        fields_filled: filled,
-        fields_total: total,
-        focused_field: focused,
-        polled_at: Time.current.iso8601
-      }
-    )
+      form_title: form_title,
+      fields_filled: filled,
+      fields_total: total,
+      focused_field: focused,
+      polled_at: Time.current.iso8601
+    }))
   end
 
   Vv::Rails::EventBus.on("chat:typing") do |data, context|
@@ -89,13 +93,10 @@ initializer "vv_rails.rb", <<~RUBY
     page_content = data["pageContent"] || {}
     form_fields = page_content["formFields"] || {}
 
-    # Persist form state as a message
-    session.messages.create!(
+    vv_publish(session, Vv::Rails::Events::FormStateChanged.new(data: {
       role: "user",
-      message_type: "form_state",
-      content: form_fields.to_json,
-      metadata: { event: "chat:typing" }
-    )
+      content: form_fields.to_json
+    }))
 
     # Build a human-readable summary of form state
     field_summary = form_fields.map do |name, info|
@@ -133,14 +134,11 @@ initializer "vv_rails.rb", <<~RUBY
     channel = context[:channel]
     session = vv_session_for(channel)
 
-    # Persist chat message
     role = data["role"] || "user"
-    session.messages.create!(
+    vv_publish(session, Vv::Rails::Events::UserInputReceived.new(data: {
       role: role,
-      message_type: "user_input",
-      content: data["content"].to_s,
-      metadata: { event: "chat" }
-    )
+      content: data["content"].to_s
+    }))
 
     Rails.logger.info "[vv] chat persisted: \#{data['content']&.truncate(80)}"
   end
@@ -156,13 +154,13 @@ initializer "vv_rails.rb", <<~RUBY
     current_user = data["currentUser"] || "Unknown"
     form_title = data["formTitle"] || "Form"
 
-    # Persist form submission as a message
-    session.messages.create!(
+    vv_publish(session, Vv::Rails::Events::FormStateChanged.new(data: {
       role: "user",
-      message_type: "form_state",
       content: fields.to_json,
-      metadata: { event: "form:submit", form_title: form_title, current_user: current_user }
-    )
+      form_title: form_title,
+      current_user: current_user,
+      event_trigger: "form:submit"
+    }))
 
     # Check for easter egg
     epu_value = fields.dig("e_pluribus_unum", "value").to_s
@@ -246,7 +244,7 @@ initializer "vv_rails.rb", <<~RUBY
       # Persist easter egg as a Turn with immediate completion
       model = vv_model
       if model
-        message_history = session.messages.order(:created_at).as_json(only: [:role, :message_type, :content])
+        message_history = session.messages_from_events
         Turn.create!(
           session: session,
           model: model,
@@ -284,7 +282,7 @@ initializer "vv_rails.rb", <<~RUBY
 
     # Create Turn (pending completion — will be filled on llm:response)
     model = vv_model
-    message_history = session.messages.order(:created_at).as_json(only: [:role, :message_type, :content])
+    message_history = session.messages_from_events
     turn = if model
       Turn.create!(
         session: session,
@@ -313,13 +311,13 @@ initializer "vv_rails.rb", <<~RUBY
     form_title = data["formTitle"] || "Form"
     fields = data["fields"] || {}
 
-    # Record the help request
-    session.messages.create!(
+    vv_publish(session, Vv::Rails::Events::FieldHelpRequested.new(data: {
       role: "system",
-      message_type: "field_help",
       content: field_name,
-      metadata: { field_label: field_label, form_title: form_title, fields: fields }
-    )
+      field_label: field_label,
+      form_title: form_title,
+      fields: fields
+    }))
 
     # Build help prompt
     field_summary = fields.map { |k, info| "  - \#{info['label'] || k}: \\"\#{info['value']}\\"" }.join("\\n")
@@ -337,7 +335,7 @@ initializer "vv_rails.rb", <<~RUBY
 
     model = vv_model
     if model
-      message_history = session.messages.order(:created_at).as_json(only: [:role, :message_type, :content])
+      message_history = session.messages_from_events
       turn = Turn.create!(
         session: session,
         model: model,
@@ -364,13 +362,12 @@ initializer "vv_rails.rb", <<~RUBY
     form_title = data["formTitle"] || "Form"
     current_user = data["currentUser"] || "Unknown"
 
-    # Record the application validation errors
-    session.messages.create!(
+    vv_publish(session, Vv::Rails::Events::FormErrorOccurred.new(data: {
       role: "system",
-      message_type: "form_error",
       content: errors.to_json,
-      metadata: { event: "form:errors", form_title: form_title, fields: fields }
-    )
+      form_title: form_title,
+      fields: fields
+    }))
 
     # Build error summary for LLM
     error_summary = errors.map do |field_name, messages_list|
@@ -398,7 +395,7 @@ initializer "vv_rails.rb", <<~RUBY
 
     model = vv_model
     if model
-      message_history = session.messages.order(:created_at).as_json(only: [:role, :message_type, :content])
+      message_history = session.messages_from_events
       turn = Turn.create!(
         session: session,
         model: model,
@@ -433,14 +430,14 @@ initializer "vv_rails.rb", <<~RUBY
       turn.update!(completion: raw)
     end
 
-    # Persist assistant response as a message
+    # Persist assistant response as an event
     if session
-      session.messages.create!(
+      vv_publish(session, Vv::Rails::Events::AssistantResponded.new(data: {
         role: "assistant",
-        message_type: "user_input",
         content: raw,
-        metadata: { event: "llm:response", request_id: request_id, purpose: purpose }
-      )
+        request_id: request_id,
+        purpose: purpose
+      }))
     end
 
     # Parse JSON from response (may be wrapped in markdown code block)
@@ -479,212 +476,6 @@ initializer "vv_rails.rb", <<~RUBY
   end
 RUBY
 
-# --- Rake tasks: message timeline ---
-
-file "lib/tasks/message_timeline.rake", <<~'RAKE'
-  namespace :message do
-    namespace :timeline do
-      desc "Display message timeline for a session (SESSION_ID=N, default: latest)"
-      task log: :environment do
-        session = find_session
-        puts "Session #{session.id}: #{session.title}"
-        puts "Created: #{session.created_at}"
-        puts "-" * 100
-
-        messages = session.messages.order(:created_at)
-        if messages.empty?
-          puts "  (no messages)"
-        else
-          messages.each do |msg|
-            ts = msg.created_at.strftime("%H:%M:%S.%L")
-            type = msg.message_type.ljust(12)
-            role = msg.role.ljust(9)
-            meta = format_metadata(msg)
-            content = msg.content.to_s.truncate(80)
-            puts "  #{ts}  [#{type}]  #{role}  #{content}"
-            puts "  #{' ' * 16}#{meta}" if meta.present?
-          end
-        end
-
-        puts ""
-        turns = session.turns.order(:created_at)
-        if turns.any?
-          puts "Turns (#{turns.count}):"
-          turns.each do |t|
-            provider = t.model.provider.name
-            model = t.model.name
-            preset = t.preset&.name || "none"
-            tokens = t.token_count
-            duration = t.duration_ms ? "#{t.duration_ms}ms" : "n/a"
-            puts "  Turn #{t.id}: #{provider}/#{model} | preset: #{preset} | tokens: #{tokens} | #{duration}"
-            puts "    request:    #{t.request.to_s.truncate(80)}"
-            puts "    completion: #{t.completion.to_s.truncate(80)}"
-            puts "    history:    #{t.message_history&.length || 0} messages"
-          end
-        end
-        puts ""
-      end
-
-      desc "Analyze message timeline patterns (SESSION_ID=N, default: latest)"
-      task analysis: :environment do
-        session = find_session
-        messages = session.messages.order(:created_at).to_a
-
-        if messages.empty?
-          puts "Session #{session.id}: no messages"
-          next
-        end
-
-        puts "Session #{session.id}: #{session.title}"
-        puts "=" * 80
-
-        # Duration
-        first_ts = messages.first.created_at
-        last_ts = messages.last.created_at
-        duration_s = (last_ts - first_ts).round(1)
-        puts "\nDuration: #{format_duration(duration_s)} (#{messages.length} messages, #{session.turns.count} turns)"
-
-        # Message type breakdown
-        puts "\nMessage types:"
-        messages.group_by(&:message_type).sort_by { |_, msgs| -msgs.length }.each do |type, msgs|
-          puts "  #{type.ljust(14)} #{msgs.length}"
-        end
-
-        # Form lifecycle
-        form_opens = messages.select { |m| m.message_type == "form_open" }
-        form_polls = messages.select { |m| m.message_type == "form_poll" }
-        form_states = messages.select { |m| m.message_type == "form_state" }
-        form_errors = messages.select { |m| m.message_type == "form_error" }
-        field_helps = messages.select { |m| m.message_type == "field_help" }
-
-        if form_opens.any?
-          puts "\nForm lifecycle:"
-          puts "  Opened:      #{form_opens.length} form(s)"
-          puts "  Poll count:  #{form_polls.length} (#{form_polls.length * 5}s of polling)"
-          puts "  State saves: #{form_states.length}"
-          puts "  Errors:      #{form_errors.length}"
-          puts "  Help reqs:   #{field_helps.length}"
-        end
-
-        # Pause detection (gaps > 10s between consecutive messages)
-        pauses = []
-        messages.each_cons(2) do |a, b|
-          gap = (b.created_at - a.created_at).round(1)
-          if gap > 10
-            pauses << { after: a, before: b, gap: gap }
-          end
-        end
-
-        if pauses.any?
-          puts "\nPauses (> 10s):"
-          pauses.each do |p|
-            after_field = p[:after].metadata&.dig("focused_field") || p[:after].message_type
-            before_field = p[:before].metadata&.dig("focused_field") || p[:before].message_type
-            puts "  #{format_duration(p[:gap])} pause between #{after_field} → #{before_field}"
-          end
-        end
-
-        # Field focus tracking (from form_poll focused_field metadata)
-        if form_polls.any?
-          focus_changes = []
-          prev_focus = nil
-          form_polls.each do |poll|
-            focused = poll.metadata&.dig("focused_field")
-            if focused && focused != prev_focus
-              focus_changes << { field: focused, at: poll.created_at }
-              prev_focus = focused
-            end
-          end
-
-          if focus_changes.any?
-            puts "\nField focus order:"
-            focus_changes.each_with_index do |fc, i|
-              duration_on_field = if i < focus_changes.length - 1
-                (focus_changes[i + 1][:at] - fc[:at]).round(1)
-              else
-                (last_ts - fc[:at]).round(1)
-              end
-              puts "  #{fc[:field].ljust(20)} #{format_duration(duration_on_field)}"
-            end
-          end
-        end
-
-        # Field help requests
-        if field_helps.any?
-          puts "\nField help requests:"
-          field_helps.each do |fh|
-            label = fh.metadata&.dig("field_label") || fh.content
-            puts "  ? #{label} at #{fh.created_at.strftime('%H:%M:%S')}"
-          end
-        end
-
-        # Error analysis
-        if form_errors.any?
-          puts "\nApplication validation errors:"
-          form_errors.each do |fe|
-            begin
-              errors = JSON.parse(fe.content)
-              errors.each do |field, msgs|
-                puts "  #{field}: #{Array(msgs).join(', ')}"
-              end
-            rescue JSON::ParserError
-              puts "  #{fe.content.truncate(80)}"
-            end
-          end
-        end
-
-        # Turn summary
-        turns = session.turns.order(:created_at)
-        if turns.any?
-          puts "\nTurn summary:"
-          total_tokens = 0
-          total_duration = 0
-          turns.each do |t|
-            tokens = t.token_count
-            total_tokens += tokens
-            total_duration += (t.duration_ms || 0)
-            puts "  Turn #{t.id}: #{t.model.provider.name}/#{t.model.name} | #{tokens} tokens | #{t.duration_ms || 'n/a'}ms"
-          end
-          puts "  Total: #{total_tokens} tokens, #{total_duration}ms across #{turns.count} turns"
-        end
-
-        puts ""
-      end
-    end
-  end
-
-  def find_session
-    if ENV["SESSION_ID"].present?
-      Session.find(ENV["SESSION_ID"])
-    else
-      session = Session.order(:created_at).last
-      abort "No sessions found. Create one first." unless session
-      session
-    end
-  end
-
-  def format_metadata(msg)
-    return nil unless msg.metadata.present?
-    parts = []
-    m = msg.metadata
-    parts << "focused: #{m['focused_field']}" if m["focused_field"]
-    parts << "filled: #{m['fields_filled']}/#{m['fields_total']}" if m["fields_filled"]
-    parts << "form: #{m['form_title']}" if m["form_title"]
-    parts << "field: #{m['field_label']}" if m["field_label"]
-    parts.any? ? parts.join(" | ") : nil
-  end
-
-  def format_duration(seconds)
-    if seconds < 60
-      "#{seconds}s"
-    elsif seconds < 3600
-      "#{(seconds / 60).floor}m #{(seconds % 60).round}s"
-    else
-      "#{(seconds / 3600).floor}h #{((seconds % 3600) / 60).floor}m"
-    end
-  end
-RAKE
-
 after_bundle do
   # --- Vv logo ---
   logo_src = File.join(File.dirname(__FILE__), "vv-logo.png")
@@ -696,7 +487,6 @@ after_bundle do
   generate "migration", "CreateProviders name:string api_base:string api_key_ciphertext:string priority:integer active:boolean requires_api_key:boolean"
   generate "migration", "CreateModels provider:references name:string api_model_id:string context_window:integer capabilities:json active:boolean"
   generate "migration", "CreatePresets model:references name:string temperature:float max_tokens:integer system_prompt:text top_p:float parameters:json active:boolean"
-  generate "migration", "CreateMessages session:references role:string message_type:string content:text metadata:json"
   generate "migration", "CreateTurns session:references model:references message_history:json request:text completion:text input_tokens:integer output_tokens:integer duration_ms:integer"
   # Add preset as a nullable reference (preset is optional on Turn)
   turns_migration = Dir.glob("db/migrate/*_create_turns.rb").first
@@ -704,14 +494,23 @@ after_bundle do
     "      t.references :preset, null: true, foreign_key: true\n"
   end
 
+  generate "rails_event_store_active_record:migration"
+
   # --- Models ---
 
   file "app/models/session.rb", <<~RUBY
     class Session < ApplicationRecord
-      has_many :messages, -> { order(:created_at) }, dependent: :destroy
       has_many :turns, -> { order(:created_at) }, dependent: :destroy
 
       validates :title, presence: true
+
+      def events
+        Rails.configuration.event_store.read.stream("session:\#{id}").to_a
+      end
+
+      def messages_from_events
+        events.map { |e| Vv::Rails::Events.to_message_hash(e) }
+      end
     end
   RUBY
 
@@ -758,19 +557,6 @@ after_bundle do
     end
   RUBY
 
-  file "app/models/message.rb", <<~RUBY
-    class Message < ApplicationRecord
-      belongs_to :session
-
-      ROLES = %w[user assistant system].freeze
-      MESSAGE_TYPES = %w[user_input navigation data_query form_state form_open form_poll form_error field_help].freeze
-
-      validates :role, inclusion: { in: ROLES }
-      validates :message_type, inclusion: { in: MESSAGE_TYPES }
-      validates :content, presence: true
-    end
-  RUBY
-
   file "app/models/turn.rb", <<~RUBY
     class Turn < ApplicationRecord
       belongs_to :session
@@ -779,6 +565,10 @@ after_bundle do
 
       validates :message_history, presence: true
       validates :request, presence: true
+
+      def token_count
+        (input_tokens || 0) + (output_tokens || 0)
+      end
     end
   RUBY
 
@@ -848,6 +638,7 @@ after_bundle do
   # --- Routes ---
 
   route 'root "app#index"'
+  route 'mount RailsEventStore::Browser => "/res" if Rails.env.development?'
 
   # --- AppController ---
 
@@ -1331,6 +1122,7 @@ after_bundle do
   say "vv-rails example app generated!", :green
   say "  App:           GET /"
   say "  Plugin config: GET /vv/config.json"
+  say "  Event browser: /res (development)"
   say ""
   say "Next steps:"
   say "  1. rails db:create db:migrate db:seed"

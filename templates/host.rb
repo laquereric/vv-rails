@@ -1,8 +1,9 @@
 # vv-rails host template
 #
 # Generates an API backend that relays LLM traffic to upstream providers,
-# stores sessions, messages, turns, and presets in SQLite, and serves as
-# a multi-device Action Cable hub for Vv-connected applications.
+# stores sessions, turns, and presets in SQLite, persists form lifecycle
+# events via Rails Event Store, and serves as a multi-device Action Cable
+# hub for Vv-connected applications.
 #
 # Usage:
 #   rails new myapp -m vendor/vv-rails/templates/host.rb
@@ -11,6 +12,7 @@
 # --- Gems ---
 
 gem "vv-rails", path: "vendor/vv-rails"
+gem "rails_event_store"
 gem "bcrypt", "~> 3.1"
 
 # --- vv:install (inlined — creates initializer and mounts engine) ---
@@ -20,6 +22,10 @@ initializer "vv_rails.rb", <<~RUBY
     config.channel_prefix = "vv"
     # config.cable_url = "ws://localhost:3000/cable"
     # config.authenticate = ->(params) { User.find_by(token: params[:token]) }
+  end
+
+  Rails.configuration.to_prepare do
+    Rails.configuration.event_store = RailsEventStore::Client.new
   end
 RUBY
 
@@ -33,11 +39,13 @@ after_bundle do
   route <<~RUBY
     root "home#index"
 
+    mount RailsEventStore::Browser => "/res" if Rails.env.development?
+
     namespace :api do
       post "auth/token", to: "auth#token"
 
       resources :sessions, only: [:index, :show, :create, :destroy] do
-        resources :messages, only: [:index, :create]
+        resources :events, only: [:index, :create]
         resources :turns, only: [:index, :show]
       end
 
@@ -110,7 +118,6 @@ after_bundle do
   generate "migration", "CreateProviders name:string api_base:string api_key_ciphertext:string priority:integer active:boolean requires_api_key:boolean"
   generate "migration", "CreateModels provider:references name:string api_model_id:string context_window:integer capabilities:json active:boolean"
   generate "migration", "CreatePresets model:references name:string temperature:float max_tokens:integer system_prompt:text top_p:float parameters:json active:boolean"
-  generate "migration", "CreateMessages session:references role:string message_type:string content:text metadata:json"
   generate "migration", "CreateTurns session:references model:references message_history:json request:text completion:text input_tokens:integer output_tokens:integer duration_ms:integer"
   # Add preset as a nullable reference (preset is optional on Turn)
   turns_migration = Dir.glob("db/migrate/*_create_turns.rb").first
@@ -120,14 +127,23 @@ after_bundle do
 
   generate "migration", "CreateApiTokens token_digest:string:index label:string expires_at:datetime"
 
+  generate "rails_event_store_active_record:migration"
+
   # --- Models ---
 
   file "app/models/session.rb", <<~RUBY
     class Session < ApplicationRecord
-      has_many :messages, -> { order(:created_at) }, dependent: :destroy
       has_many :turns, -> { order(:created_at) }, dependent: :destroy
 
       validates :title, presence: true
+
+      def events
+        Rails.configuration.event_store.read.stream("session:\#{id}").to_a
+      end
+
+      def messages_from_events
+        events.map { |e| Vv::Rails::Events.to_message_hash(e) }
+      end
 
       def as_json(options = {})
         super(options.merge(include: options[:include] || {}, methods: []))
@@ -193,19 +209,6 @@ after_bundle do
         params[:top_p] = top_p if top_p
         params.merge((parameters || {}).symbolize_keys)
       end
-    end
-  RUBY
-
-  file "app/models/message.rb", <<~RUBY
-    class Message < ApplicationRecord
-      belongs_to :session
-
-      ROLES = %w[user assistant system].freeze
-      MESSAGE_TYPES = %w[user_input navigation data_query form_state form_open form_poll form_error field_help].freeze
-
-      validates :role, inclusion: { in: ROLES }
-      validates :message_type, inclusion: { in: MESSAGE_TYPES }
-      validates :content, presence: true
     end
   RUBY
 
@@ -292,8 +295,12 @@ after_bundle do
         end
 
         def show
-          session = Session.includes(:messages, :turns).find(params[:id])
-          render json: session.as_json(include: [:messages, :turns])
+          session = Session.includes(:turns).find(params[:id])
+          render json: session.as_json(include: [:turns]).merge(
+            events: session.events.map { |e|
+              { event_id: e.event_id, event_type: e.event_type, data: e.data, timestamp: e.metadata[:timestamp] }
+            }
+          )
         end
 
         def create
@@ -320,38 +327,46 @@ after_bundle do
     end
   RUBY
 
-  # --- Messages controller ---
+  # --- Events controller (RES-backed, replaces messages) ---
 
-  file "app/controllers/api/messages_controller.rb", <<~RUBY
+  file "app/controllers/api/events_controller.rb", <<~RUBY
     module Api
-      class MessagesController < BaseController
+      class EventsController < BaseController
         def index
           session = Session.find(params[:session_id])
-          render json: session.messages
+          render json: session.events.map { |e| event_json(e) }
         end
 
         def create
           session = Session.find(params[:session_id])
-          message = session.messages.build(message_params)
-          if message.save
-            broadcast_message(session, message)
-            render json: message, status: :created
-          else
-            render json: { errors: message.errors.full_messages }, status: :unprocessable_entity
+          event_class = Vv::Rails::Events.for(params[:message_type])
+          unless event_class
+            render json: { error: "Unknown message_type: \#{params[:message_type]}" }, status: :unprocessable_entity
+            return
           end
+
+          event = event_class.new(data: {
+            role: params[:role],
+            content: params[:content],
+            **(params[:metadata]&.permit!&.to_h || {})
+          })
+          Rails.configuration.event_store.publish(event, stream_name: "session:\#{session.id}")
+
+          broadcast_event(session, event)
+          render json: event_json(event), status: :created
         end
 
         private
 
-        def message_params
-          params.require(:message).permit(:role, :message_type, :content, metadata: {})
+        def event_json(e)
+          { event_id: e.event_id, event_type: e.event_type, data: e.data, timestamp: e.metadata[:timestamp] }
         end
 
-        def broadcast_message(session, message)
+        def broadcast_event(session, event)
           prefix = Vv::Rails.configuration.channel_prefix
           ActionCable.server.broadcast(
             "\#{prefix}:session:\#{session.id}",
-            { event: "message:new", data: message.as_json }
+            { event: "event:new", data: event_json(event) }
           )
         end
       end
@@ -525,8 +540,8 @@ after_bundle do
           preset = params[:preset_id] ? Preset.find(params[:preset_id]) : nil
           session = params[:session_id] ? Session.find(params[:session_id]) : nil
 
-          # Build message history snapshot from session messages
-          message_history = session ? session.messages.order(:created_at).as_json(only: [:role, :message_type, :content]) : []
+          # Build message history snapshot from event store
+          message_history = session ? session.messages_from_events : []
 
           # Create turn record
           turn = Turn.new(
@@ -689,224 +704,19 @@ after_bundle do
     end
   RUBY
 
-  # --- Rake tasks: message timeline ---
-
-  file "lib/tasks/message_timeline.rake", <<~'RAKE'
-    namespace :message do
-      namespace :timeline do
-        desc "Display message timeline for a session (SESSION_ID=N, default: latest)"
-        task log: :environment do
-          session = find_session
-          puts "Session #{session.id}: #{session.title}"
-          puts "Created: #{session.created_at}"
-          puts "-" * 100
-
-          messages = session.messages.order(:created_at)
-          if messages.empty?
-            puts "  (no messages)"
-          else
-            messages.each do |msg|
-              ts = msg.created_at.strftime("%H:%M:%S.%L")
-              type = msg.message_type.ljust(12)
-              role = msg.role.ljust(9)
-              meta = format_metadata(msg)
-              content = msg.content.to_s.truncate(80)
-              puts "  #{ts}  [#{type}]  #{role}  #{content}"
-              puts "  #{' ' * 16}#{meta}" if meta.present?
-            end
-          end
-
-          puts ""
-          turns = session.turns.order(:created_at)
-          if turns.any?
-            puts "Turns (#{turns.count}):"
-            turns.each do |t|
-              provider = t.model.provider.name
-              model = t.model.name
-              preset = t.preset&.name || "none"
-              tokens = t.token_count
-              duration = t.duration_ms ? "#{t.duration_ms}ms" : "n/a"
-              puts "  Turn #{t.id}: #{provider}/#{model} | preset: #{preset} | tokens: #{tokens} | #{duration}"
-              puts "    request:    #{t.request.to_s.truncate(80)}"
-              puts "    completion: #{t.completion.to_s.truncate(80)}"
-              puts "    history:    #{t.message_history&.length || 0} messages"
-            end
-          end
-          puts ""
-        end
-
-        desc "Analyze message timeline patterns (SESSION_ID=N, default: latest)"
-        task analysis: :environment do
-          session = find_session
-          messages = session.messages.order(:created_at).to_a
-
-          if messages.empty?
-            puts "Session #{session.id}: no messages"
-            next
-          end
-
-          puts "Session #{session.id}: #{session.title}"
-          puts "=" * 80
-
-          # Duration
-          first_ts = messages.first.created_at
-          last_ts = messages.last.created_at
-          duration_s = (last_ts - first_ts).round(1)
-          puts "\nDuration: #{format_duration(duration_s)} (#{messages.length} messages, #{session.turns.count} turns)"
-
-          # Message type breakdown
-          puts "\nMessage types:"
-          messages.group_by(&:message_type).sort_by { |_, msgs| -msgs.length }.each do |type, msgs|
-            puts "  #{type.ljust(14)} #{msgs.length}"
-          end
-
-          # Form lifecycle
-          form_opens = messages.select { |m| m.message_type == "form_open" }
-          form_polls = messages.select { |m| m.message_type == "form_poll" }
-          form_states = messages.select { |m| m.message_type == "form_state" }
-          form_errors = messages.select { |m| m.message_type == "form_error" }
-          field_helps = messages.select { |m| m.message_type == "field_help" }
-
-          if form_opens.any?
-            puts "\nForm lifecycle:"
-            puts "  Opened:      #{form_opens.length} form(s)"
-            puts "  Poll count:  #{form_polls.length} (#{form_polls.length * 5}s of polling)"
-            puts "  State saves: #{form_states.length}"
-            puts "  Errors:      #{form_errors.length}"
-            puts "  Help reqs:   #{field_helps.length}"
-          end
-
-          # Pause detection (gaps > 10s between consecutive messages)
-          pauses = []
-          messages.each_cons(2) do |a, b|
-            gap = (b.created_at - a.created_at).round(1)
-            if gap > 10
-              pauses << { after: a, before: b, gap: gap }
-            end
-          end
-
-          if pauses.any?
-            puts "\nPauses (> 10s):"
-            pauses.each do |p|
-              after_field = p[:after].metadata&.dig("focused_field") || p[:after].message_type
-              before_field = p[:before].metadata&.dig("focused_field") || p[:before].message_type
-              puts "  #{format_duration(p[:gap])} pause between #{after_field} → #{before_field}"
-            end
-          end
-
-          # Field focus tracking (from form_poll focused_field metadata)
-          if form_polls.any?
-            focus_changes = []
-            prev_focus = nil
-            form_polls.each do |poll|
-              focused = poll.metadata&.dig("focused_field")
-              if focused && focused != prev_focus
-                focus_changes << { field: focused, at: poll.created_at }
-                prev_focus = focused
-              end
-            end
-
-            if focus_changes.any?
-              puts "\nField focus order:"
-              focus_changes.each_with_index do |fc, i|
-                duration_on_field = if i < focus_changes.length - 1
-                  (focus_changes[i + 1][:at] - fc[:at]).round(1)
-                else
-                  (last_ts - fc[:at]).round(1)
-                end
-                puts "  #{fc[:field].ljust(20)} #{format_duration(duration_on_field)}"
-              end
-            end
-          end
-
-          # Field help requests
-          if field_helps.any?
-            puts "\nField help requests:"
-            field_helps.each do |fh|
-              label = fh.metadata&.dig("field_label") || fh.content
-              puts "  ? #{label} at #{fh.created_at.strftime('%H:%M:%S')}"
-            end
-          end
-
-          # Error analysis
-          if form_errors.any?
-            puts "\nApplication validation errors:"
-            form_errors.each do |fe|
-              begin
-                errors = JSON.parse(fe.content)
-                errors.each do |field, msgs|
-                  puts "  #{field}: #{Array(msgs).join(', ')}"
-                end
-              rescue JSON::ParserError
-                puts "  #{fe.content.truncate(80)}"
-              end
-            end
-          end
-
-          # Turn summary
-          turns = session.turns.order(:created_at)
-          if turns.any?
-            puts "\nTurn summary:"
-            total_tokens = 0
-            total_duration = 0
-            turns.each do |t|
-              tokens = t.token_count
-              total_tokens += tokens
-              total_duration += (t.duration_ms || 0)
-              puts "  Turn #{t.id}: #{t.model.provider.name}/#{t.model.name} | #{tokens} tokens | #{t.duration_ms || 'n/a'}ms"
-            end
-            puts "  Total: #{total_tokens} tokens, #{total_duration}ms across #{turns.count} turns"
-          end
-
-          puts ""
-        end
-      end
-    end
-
-    def find_session
-      if ENV["SESSION_ID"].present?
-        Session.find(ENV["SESSION_ID"])
-      else
-        session = Session.order(:created_at).last
-        abort "No sessions found. Create one first." unless session
-        session
-      end
-    end
-
-    def format_metadata(msg)
-      return nil unless msg.metadata.present?
-      parts = []
-      m = msg.metadata
-      parts << "focused: #{m['focused_field']}" if m["focused_field"]
-      parts << "filled: #{m['fields_filled']}/#{m['fields_total']}" if m["fields_filled"]
-      parts << "form: #{m['form_title']}" if m["form_title"]
-      parts << "field: #{m['field_label']}" if m["field_label"]
-      parts.any? ? parts.join(" | ") : nil
-    end
-
-    def format_duration(seconds)
-      if seconds < 60
-        "#{seconds}s"
-      elsif seconds < 3600
-        "#{(seconds / 60).floor}m #{(seconds % 60).round}s"
-      else
-        "#{(seconds / 3600).floor}h #{((seconds % 3600) / 60).floor}m"
-      end
-    end
-  RAKE
-
   say ""
   say "vv-host app generated!", :green
   say "  API base:      /api"
   say "  Auth:          POST /api/auth/token"
   say "  Sessions:      /api/sessions"
-  say "  Messages:      /api/sessions/:id/messages"
+  say "  Events:        /api/sessions/:id/events"
   say "  Turns:         /api/sessions/:id/turns"
   say "  Providers:     /api/providers"
   say "  Models:        /api/models"
   say "  Presets:       /api/models/:id/presets"
   say "  Relay:         POST /api/relay"
   say "  Plugin config: GET /vv/config.json"
+  say "  Event browser: /res (development)"
   say ""
   say "Next steps:"
   say "  1. rails db:create db:migrate db:seed"
