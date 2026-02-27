@@ -1,21 +1,22 @@
 # vv-rails
 
-Rails engine that provides the server-side connection point for the [Vv browser plugin](../vv-plugin) — Action Cable channels, server-side event routing, and generators.
+Rails engine that provides the server-side connection point for the [Vv browser plugin](../vv-plugin) — Action Cable channels, server-side event routing, and Rails Event Store integration.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Rails App + vv-rails                           │
+│  Rails App                                      │
 │                                                 │
 │  ┌──────────────┐  ┌────────────────────┐      │
-│  │ VvChannel    │  │ Vv::ConfigController│      │
-│  │ (ActionCable)│  │ GET /vv/config.json │      │
+│  │ VvChannel    │  │ ConfigController   │      │
+│  │ (vv-rails)   │  │ (vv-browser-mgr)  │      │
+│  │ ActionCable  │  │ GET /vv/config.json│      │
 │  └──────┬───────┘  └────────────────────┘      │
 │         │                                       │
 │  ┌──────▼───────┐  ┌────────────────────┐      │
 │  │ Vv::Rails::  │  │ Vv::Rails::        │      │
-│  │ EventBus     │  │ Configuration      │      │
+│  │ EventBus     │  │ Events (RES)       │      │
 │  └──────────────┘  └────────────────────┘      │
 └─────────────────────────────────────────────────┘
          ▲ WebSocket (Action Cable)
@@ -28,10 +29,11 @@ Rails engine that provides the server-side connection point for the [Vv browser 
 
 ## Installation
 
-Add to your Gemfile:
+Add to your Gemfile (along with vv-browser-manager for the discovery endpoint):
 
 ```ruby
 gem "vv-rails", path: "vendor/vv-rails"
+gem "vv-browser-manager", path: "vendor/vv-browser-manager"
 ```
 
 Run the install generator:
@@ -42,7 +44,6 @@ rails generate vv:install
 
 This creates:
 - `config/initializers/vv_rails.rb` — configuration
-- Adds `mount Vv::Rails::Engine => '/vv'` to your routes
 
 ## Configuration
 
@@ -91,26 +92,31 @@ Vv::Rails::EventBus.on("chat:complete") do |data, context|
 end
 ```
 
-## Client JS
+## Events (Rails Event Store)
 
-Auto-connect the plugin from your Rails app's JavaScript:
+9 typed event classes replace the Messages table:
 
-```js
-import { connectVv } from 'vv-rails';
+```ruby
+# Publish an event
+event_store = Rails.configuration.event_store
+event_store.publish(
+  Vv::Rails::Events::FormOpened.new(data: { role: "system", content: "{}", form_title: "My Form" }),
+  stream_name: "session:#{session.id}"
+)
 
-// Manual connect
-connectVv({ cableUrl: '/cable', channel: 'VvChannel' });
+# Read events for a session
+session.events                  # => [RailsEventStore::Event, ...]
+session.messages_from_events    # => [{role:, message_type:, content:}, ...]
+
+# Map message_type to event class
+Vv::Rails::Events.for("form_open")  # => Vv::Rails::Events::FormOpened
 ```
 
-Or use the `data-vv-auto` attribute for automatic connection:
-
-```html
-<body data-vv-auto data-page-id="home">
-```
+Event timeline inspection via RES browser UI at `/res` (development).
 
 ## Plugin Discovery
 
-The config endpoint lets the plugin discover connection details:
+The `vv-browser-manager` gem provides the config endpoint:
 
 ```
 GET /vv/config.json
@@ -120,7 +126,7 @@ GET /vv/config.json
 {
   "cable_url": "ws://localhost:3000/cable",
   "channel": "VvChannel",
-  "version": "0.7.0",
+  "version": "0.9.0",
   "prefix": "vv"
 }
 ```
@@ -130,7 +136,7 @@ GET /vv/config.json
 1. Plugin sends event via Action Cable → `VvChannel#receive`
 2. Channel routes through `Vv::Rails::EventBus.emit(event, payload)`
 3. Registered handlers process the event
-4. Handlers can call `channel.render_to` or `channel.emit` to respond
+4. Handlers publish RES events and can call `channel.render_to` or `channel.emit` to respond
 5. Plugin content script applies DOM updates via Turbo Stream actions
 
 ## Templates
@@ -145,11 +151,11 @@ Application templates for generating complete Rails apps with vv-rails pre-confi
 
 ### example.rb
 
-Generates a browser-side LLM chat demo. Adds Stimulus controllers for WebGPU model loading via WebLLM, a chat interface, and model status management. Runs entirely client-side — no backend inference server required.
+Generates a browser-side LLM chat demo with EventBus handlers for the full form lifecycle (open, poll, type, submit, errors, field help). Events stored via Rails Event Store.
 
 ### host.rb
 
-Generates an API backend that relays LLM traffic to upstream providers and stores sessions/context in PostgreSQL for multi-device access. Includes token authentication, Action Cable relay channels, and a multi-provider routing system.
+Generates an API backend that relays LLM traffic to upstream providers and stores sessions/turns in SQLite. Includes token authentication, Action Cable relay channels, RES event storage, and a multi-provider routing system.
 
 ### mobile.rb
 
@@ -160,11 +166,11 @@ Generates a mobile-optimized chat UI that connects to a vv-host backend. Include
 | File | Purpose |
 |------|---------|
 | `lib/vv/rails.rb` | Main module entry |
-| `lib/vv/rails/engine.rb` | Rails::Engine — mounts at `/vv` |
+| `lib/vv/rails/engine.rb` | Rails::Engine — ActionCable auto-discovery |
 | `lib/vv/rails/configuration.rb` | `Vv::Rails.configure` block |
 | `lib/vv/rails/event_bus.rb` | Server-side `on/off/emit` event routing |
+| `lib/vv/rails/events.rb` | 9 RES event classes + TYPE_MAP + helpers |
 | `app/channels/vv_channel.rb` | Action Cable channel |
-| `app/controllers/vv/config_controller.rb` | Plugin discovery endpoint |
 | `app/javascript/vv-rails/index.js` | Client JS auto-connect |
 | `lib/generators/vv/install_generator.rb` | `rails generate vv:install` |
 | `templates/example.rb` | Application template — browser chat demo |
@@ -176,3 +182,4 @@ Generates a mobile-optimized chat UI that connects to a vv-host backend. Include
 - Ruby >= 3.3.0
 - Rails >= 7.0
 - Action Cable
+- Rails Event Store >= 2.0

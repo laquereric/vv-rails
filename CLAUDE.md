@@ -6,15 +6,17 @@ Rails engine gem providing server-side Vv integration via Action Cable.
 
 | File | Purpose |
 |------|---------|
-| `lib/vv/rails.rb` | Main module, requires engine/config/event_bus |
-| `lib/vv/rails/engine.rb` | `Vv::Rails::Engine` — isolates namespace, auto-mounts at `/vv` |
+| `lib/vv/rails.rb` | Main module, requires engine/config/events/event_bus |
+| `lib/vv/rails/engine.rb` | `Vv::Rails::Engine` — isolates namespace, ActionCable auto-discovery |
 | `lib/vv/rails/configuration.rb` | `Vv::Rails.configure` DSL |
 | `lib/vv/rails/event_bus.rb` | Server-side pub/sub: `on`, `off`, `emit` |
+| `lib/vv/rails/events.rb` | 9 RES event classes + TYPE_MAP + helpers |
 | `app/channels/vv_channel.rb` | Action Cable channel — receive, render_to, emit |
-| `app/controllers/vv/config_controller.rb` | `GET /vv/config.json` — plugin discovery |
 | `app/javascript/vv-rails/index.js` | Client JS: `connectVv()`, `disconnectVv()` |
 | `lib/generators/vv/install_generator.rb` | `rails generate vv:install` |
-| `vv-rails.gemspec` | Ruby >= 3.3, Rails >= 7.0 < 9 |
+| `vv-rails.gemspec` | Ruby >= 3.3, Rails >= 7.0 < 9, rails_event_store >= 2.0 |
+
+**Note:** ConfigController moved to `vv-browser-manager` gem. This gem no longer mounts routes.
 
 ## Templates
 
@@ -25,6 +27,8 @@ Rails engine gem providing server-side Vv integration via Action Cable.
 | `templates/mobile.rb` | Mobile-optimized chat PWA (port 3002) | No — thin client, talks to Host |
 | `templates/platform_manager.rb` | Dev dashboard (port 3000) | Yes — HostInstance only |
 
+All templates include both `vv-rails` and `vv-browser-manager` gems.
+
 ## Schema (host.rb + example.rb)
 
 ```
@@ -32,7 +36,8 @@ Provider  1 ──→ N  Model  1 ──→ N  Preset
                       │                │ (optional)
                       ▼                ▼
 Session   1 ──→ N  Turn ────────────────→ Model + Preset
-          1 ──→ N  Message
+    │
+    └── events via RES stream "session:{id}"
 ```
 
 | Table | Purpose |
@@ -40,10 +45,32 @@ Session   1 ──→ N  Turn ────────────────�
 | `providers` | LLM vendor: name, api_base, encrypted api_key, requires_api_key, priority |
 | `models` | Per-provider model: api_model_id, context_window, capabilities (json) |
 | `presets` | Named inference params: temperature, max_tokens, system_prompt, top_p, parameters (json) |
-| `sessions` | Groups messages and turns |
-| `messages` | Context entries: role (user/assistant/system), message_type (user_input/navigation/data_query/form_state/form_open/form_poll/form_error/field_help) |
+| `sessions` | Groups events and turns |
+| `event_store_events` | RES-managed. 9 event types stored in streams `"session:{id}"` |
 | `turns` | One LLM request/response: model, preset, message_history snapshot (json), request, completion, token counts |
 | `api_tokens` | Host only — Bearer token auth via BCrypt |
+
+## Events (Rails Event Store)
+
+9 typed event classes in `Vv::Rails::Events`:
+
+| Class | message_type | Purpose |
+|-------|-------------|---------|
+| `FormOpened` | form_open | Form rendered |
+| `FormPolled` | form_poll | 5s heartbeat |
+| `FormStateChanged` | form_state | Field values changed |
+| `UserInputReceived` | user_input | User chat/text input |
+| `FieldHelpRequested` | field_help | User typed `?` |
+| `FormErrorOccurred` | form_error | App validation error |
+| `NavigationOccurred` | navigation | Page navigation |
+| `DataQueried` | data_query | Data lookup |
+| `AssistantResponded` | assistant | LLM response |
+
+Helpers: `Events.for("form_open")` → class, `Events.to_message_hash(event)` → `{role, message_type, content}`.
+
+Session methods: `session.events` reads from RES stream, `session.messages_from_events` converts to message format for Turn snapshots.
+
+**Timeline inspection:** RES browser UI at `/res` (development) replaces rake tasks.
 
 ## Architecture pattern
 
@@ -55,39 +82,22 @@ CLASSIC:  GET /new → render ────────────────�
 
 VV:       GET /    → render → open → poll → type → poll → submit → LLM pre-validate → app submit
                               │       │      │      │      │         Turn 1              │
-                              Message  Msg   Msg    Msg    Turn + Messages           app errors?
-                              (open)  (poll) (state)(poll)  (snapshot + completion)      │
-                                                                                    form_error msg
-                                                                                    Turn 2 (error_resolution)
-                                                                                    LLM-enhanced suggestions
+                              Event   Evt   Evt    Evt    Turn + Events             app errors?
+                              (open) (poll) (state)(poll)  (snapshot + completion)      │
+                                                                                   FormErrorOccurred
+                                                                                   Turn 2 (error_resolution)
+                                                                                   LLM-enhanced suggestions
 
-FIELD HELP:  user types '?' in field → field_help message → Turn (field_help) → help text below field
+FIELD HELP:  user types '?' in field → FieldHelpRequested → Turn (field_help) → help text below field
 ```
 
 **Pre-submit turn:** `form:submit` creates Turn with message_history snapshot → LLM validates → `form:submit:result`. If LLM approves, form submits to application logic.
 
-**Post-submit turn:** Application validates → returns per-field errors → `form:errors` event → `form_error` message recorded → Turn created → LLM translates raw errors into plain-language fix suggestions → `form:error:suggestions` pushed to client with per-field hints.
+**Post-submit turn:** Application validates → returns per-field errors → `form:errors` event → FormErrorOccurred published → Turn created → LLM translates raw errors into plain-language fix suggestions → `form:error:suggestions` pushed to client with per-field hints.
 
-**Field help:** User types `?` as first character in any field → `field:help` event → `field_help` message recorded → Turn created → LLM explains the field → `field:help:response` pushed to client with contextual help text.
+**Field help:** User types `?` as first character in any field → `field:help` event → FieldHelpRequested published → Turn created → LLM explains the field → `field:help:response` pushed to client with contextual help text.
 
-**Single-table timeline:** `session.messages.order(:created_at)` gives you the full temporal view. No joins. Detect patterns like "paused 12s between field 3 and 4" by comparing form_poll timestamps and focused_field values. `form_error` and `field_help` entries show where users struggled.
-
-**Complexity stays in Host/EventBus.** Client fires simple events. Server handles session lookup, message persistence, model selection, prompt assembly, turn tracking, result dispatch.
-
-## Rake tasks
-
-Both host and example apps include timeline inspection tasks:
-
-```bash
-rails message:timeline:log                  # chronological message timeline (latest session)
-rails message:timeline:log SESSION_ID=3     # specific session
-rails message:timeline:analysis             # pattern analysis (latest session)
-rails message:timeline:analysis SESSION_ID=3
-```
-
-**`message:timeline:log`** — Messages in order with timestamps, types, roles, metadata (focused_field, fields_filled, form_title), plus turn details (model, preset, tokens, duration, request/completion).
-
-**`message:timeline:analysis`** — Duration, message type breakdown, form lifecycle stats (opens, polls, state saves, errors, help requests), pause detection (gaps >10s), field focus order with time-on-field, field help requests, application validation errors parsed from form_error content, turn token/duration summary.
+**Complexity stays in Host/EventBus.** Client fires simple events. Server handles session lookup, event publishing, model selection, prompt assembly, turn tracking, result dispatch.
 
 ## VvChannel API
 
@@ -130,6 +140,7 @@ end
 - Host app needs `app/channels/application_cable/{connection,channel}.rb`
 - For Chrome extension access: `config.action_cable.disable_request_forgery_protection = true`
 - Use `async` adapter (not `solid_cable`) for simple setups
+- Templates require both `vendor/vv-rails` and `vendor/vv-browser-manager` symlinks before `rails new`
 
 ## Test
 
