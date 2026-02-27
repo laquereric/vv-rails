@@ -145,9 +145,9 @@ initializer "vv_rails.rb", <<~RUBY
     Rails.logger.info "[vv] chat persisted: \#{data['content']&.truncate(80)}"
   end
 
-  # --- Form submit: easter egg detection + LLM validation ---
+  # --- Form submit, error resolution, and field help ---
 
-  form_validations = {}
+  pending_requests = {}
 
   Vv::Rails::EventBus.on("form:submit") do |data, context|
     channel = context[:channel]
@@ -295,7 +295,7 @@ initializer "vv_rails.rb", <<~RUBY
       )
     end
 
-    form_validations[request_id] = { channel: channel, data: data, session: session, turn: turn }
+    pending_requests[request_id] = { channel: channel, data: data, session: session, turn: turn, purpose: "validation" }
     channel.emit("llm:request", {
       requestId: request_id,
       messages: messages,
@@ -303,15 +303,130 @@ initializer "vv_rails.rb", <<~RUBY
     })
   end
 
+  # --- Field help: user types '?' in a field ---
+
+  Vv::Rails::EventBus.on("field:help") do |data, context|
+    channel = context[:channel]
+    session = vv_session_for(channel)
+    field_name = data["fieldName"]
+    field_label = data["fieldLabel"] || field_name
+    form_title = data["formTitle"] || "Form"
+    fields = data["fields"] || {}
+
+    # Record the help request
+    session.messages.create!(
+      role: "system",
+      message_type: "field_help",
+      content: field_name,
+      metadata: { field_label: field_label, form_title: form_title, fields: fields }
+    )
+
+    # Build help prompt
+    field_summary = fields.map { |k, info| "  - \#{info['label'] || k}: \\"\#{info['value']}\\"" }.join("\\n")
+    request_id = SecureRandom.hex(8)
+    messages = [
+      {
+        "role" => "system",
+        "content" => "You are a form field assistant for a \\"\#{form_title}\\" form. The user pressed '?' on the field \\"\#{field_label}\\". Explain what this field is for and what to enter. Be concise (1-3 sentences). Respond ONLY with valid JSON: {\\"help\\": \\"your explanation\\"}"
+      },
+      {
+        "role" => "user",
+        "content" => "Field: \#{field_label}\\nAll fields:\\n\#{field_summary}\\nWhat should I enter here?"
+      }
+    ]
+
+    model = vv_model
+    if model
+      message_history = session.messages.order(:created_at).as_json(only: [:role, :message_type, :content])
+      turn = Turn.create!(
+        session: session,
+        model: model,
+        preset: vv_preset,
+        message_history: message_history,
+        request: messages.to_json
+      )
+      pending_requests[request_id] = { channel: channel, data: data, session: session, turn: turn, purpose: "field_help", field_name: field_name }
+      channel.emit("llm:request", {
+        requestId: request_id,
+        messages: messages,
+        options: { max_tokens: 256, temperature: 0.3 }
+      })
+    end
+  end
+
+  # --- Post-submit error resolution: application validation errors → LLM help ---
+
+  Vv::Rails::EventBus.on("form:errors") do |data, context|
+    channel = context[:channel]
+    session = vv_session_for(channel)
+    errors = data["errors"] || {}
+    fields = data["fields"] || {}
+    form_title = data["formTitle"] || "Form"
+    current_user = data["currentUser"] || "Unknown"
+
+    # Record the application validation errors
+    session.messages.create!(
+      role: "system",
+      message_type: "form_error",
+      content: errors.to_json,
+      metadata: { event: "form:errors", form_title: form_title, fields: fields }
+    )
+
+    # Build error summary for LLM
+    error_summary = errors.map do |field_name, messages_list|
+      label = fields.dig(field_name, "label") || field_name
+      "  - \#{label} (\#{field_name}): \#{Array(messages_list).join(', ')}"
+    end.join("\\n")
+
+    field_summary = fields.map do |key, info|
+      label = info["label"] || key
+      value = info["value"].to_s
+      "  - \#{label} (\#{key}): \\"\#{value}\\""
+    end.join("\\n")
+
+    request_id = SecureRandom.hex(8)
+    messages = [
+      {
+        "role" => "system",
+        "content" => "You are a form correction assistant for a \\"\#{form_title}\\" form. The application returned validation errors after submission. The current user is \\"\#{current_user}\\".\\n\\nHelp the user understand each error and what to fix. Respond ONLY with valid JSON: {\\"suggestions\\": {\\"field_name\\": \\"plain-language explanation of what to fix\\", ...}, \\"summary\\": \\"one sentence overall summary\\"}\\n\\nOnly include fields that have errors. Field names must match the keys provided."
+      },
+      {
+        "role" => "user",
+        "content" => "Validation errors:\\n\#{error_summary}\\n\\nCurrent field values:\\n\#{field_summary}\\n\\nHelp me fix these."
+      }
+    ]
+
+    model = vv_model
+    if model
+      message_history = session.messages.order(:created_at).as_json(only: [:role, :message_type, :content])
+      turn = Turn.create!(
+        session: session,
+        model: model,
+        preset: vv_preset,
+        message_history: message_history,
+        request: messages.to_json
+      )
+      pending_requests[request_id] = { channel: channel, data: data, session: session, turn: turn, purpose: "error_resolution" }
+      channel.emit("llm:request", {
+        requestId: request_id,
+        messages: messages,
+        options: { max_tokens: 512, temperature: 0.3 }
+      })
+    end
+  end
+
+  # --- LLM response: branches on purpose (validation, error_resolution, field_help) ---
+
   Vv::Rails::EventBus.on("llm:response") do |data, context|
     request_id = data["requestId"]
-    pending = form_validations.delete(request_id)
+    pending = pending_requests.delete(request_id)
     next unless pending
 
     channel = pending[:channel]
     session = pending[:session]
     turn = pending[:turn]
     raw = data["response"].to_s
+    purpose = pending[:purpose] || "validation"
 
     # Complete the Turn with the LLM response
     if turn
@@ -324,27 +439,42 @@ initializer "vv_rails.rb", <<~RUBY
         role: "assistant",
         message_type: "user_input",
         content: raw,
-        metadata: { event: "llm:response", request_id: request_id }
+        metadata: { event: "llm:response", request_id: request_id, purpose: purpose }
       )
     end
 
     # Parse JSON from response (may be wrapped in markdown code block)
     parsed = begin
       json_match = raw.match(/\\{[\\s\\S]*\\}/)
-      json_match ? JSON.parse(json_match[0]) : { "answer" => "yes", "explanation" => raw }
+      json_match ? JSON.parse(json_match[0]) : {}
     rescue JSON::ParserError
-      { "answer" => "yes", "explanation" => raw }
+      {}
     end
 
-    ok = parsed["answer"].to_s.downcase.start_with?("y")
-    explanation = parsed["explanation"].to_s
+    case purpose
+    when "field_help"
+      # Field help: deliver explanation to client
+      help_text = parsed["help"] || raw
+      channel.emit("field:help:response", { fieldName: pending[:field_name], help: help_text })
 
-    if ok
-      channel.emit("form:submit:result", { ok: true, answer: parsed["answer"], explanation: explanation })
+    when "error_resolution"
+      # Post-submit: deliver LLM-enhanced error explanations to client
+      suggestions = parsed["suggestions"] || {}
+      summary = parsed["summary"] || "Please review the flagged fields."
+      channel.emit("form:error:suggestions", { suggestions: suggestions, summary: summary, turn_id: turn&.id })
+
     else
-      channel.emit("sidebar:open", {})
-      channel.emit("sidebar:message", { content: explanation, label: "Form Review" })
-      channel.emit("form:submit:result", { ok: false, answer: parsed["answer"], explanation: explanation })
+      # Pre-submit validation: check pass/fail
+      ok = (parsed["answer"] || "yes").to_s.downcase.start_with?("y")
+      explanation = (parsed["explanation"] || raw).to_s
+
+      if ok
+        channel.emit("form:submit:result", { ok: true, answer: parsed["answer"], explanation: explanation })
+      else
+        channel.emit("sidebar:open", {})
+        channel.emit("sidebar:message", { content: explanation, label: "Form Review" })
+        channel.emit("form:submit:result", { ok: false, answer: parsed["answer"], explanation: explanation })
+      end
     end
   end
 RUBY
@@ -361,7 +491,12 @@ after_bundle do
   generate "migration", "CreateModels provider:references name:string api_model_id:string context_window:integer capabilities:json active:boolean"
   generate "migration", "CreatePresets model:references name:string temperature:float max_tokens:integer system_prompt:text top_p:float parameters:json active:boolean"
   generate "migration", "CreateMessages session:references role:string message_type:string content:text metadata:json"
-  generate "migration", "CreateTurns session:references model:references preset:references message_history:json request:text completion:text input_tokens:integer output_tokens:integer duration_ms:integer"
+  generate "migration", "CreateTurns session:references model:references message_history:json request:text completion:text input_tokens:integer output_tokens:integer duration_ms:integer"
+  # Add preset as a nullable reference (preset is optional on Turn)
+  turns_migration = Dir.glob("db/migrate/*_create_turns.rb").first
+  inject_into_file turns_migration, after: "t.references :model, null: false, foreign_key: true\n" do
+    "      t.references :preset, null: true, foreign_key: true\n"
+  end
 
   # --- Models ---
 
@@ -422,7 +557,7 @@ after_bundle do
       belongs_to :session
 
       ROLES = %w[user assistant system].freeze
-      MESSAGE_TYPES = %w[user_input navigation data_query form_state form_open form_poll].freeze
+      MESSAGE_TYPES = %w[user_input navigation data_query form_state form_open form_poll form_error field_help].freeze
 
       validates :role, inclusion: { in: ROLES }
       validates :message_type, inclusion: { in: MESSAGE_TYPES }
@@ -654,6 +789,7 @@ after_bundle do
         window.postMessage({ type: "vv:chatbox:show" }, "*")
 
         this.setupFormSubmit()
+        this.setupFieldHelp()
         this.emitFormOpen()
         this.startFormPolling()
       }
@@ -744,7 +880,7 @@ after_bundle do
         const btn = document.getElementById("form-send")
         if (!btn) return
 
-        // Listen for results from Rails (via plugin)
+        // Pre-submit LLM validation result
         window.addEventListener("message", (event) => {
           if (event.source !== window) return
           if (event.data?.type !== "vv:form:submit:result") return
@@ -754,12 +890,41 @@ after_bundle do
 
           if (answer === "egg") {
             if (status) { status.textContent = "\u{1F95A} You found it!"; status.style.color = "#764ba2" }
+            btn.disabled = false
           } else if (ok) {
-            if (status) { status.textContent = "Submitted!"; status.style.color = "#28a745" }
+            // Pre-submit LLM approved — now submit to application logic
+            if (status) { status.textContent = "Submitting..."; status.style.color = "#667eea" }
+            this.submitToApplication()
           } else {
             if (status) { status.textContent = "Review needed \u2014 see chat sidebar"; status.style.color = "#e67e22" }
+            btn.disabled = false
           }
-          btn.disabled = false
+        })
+
+        // Post-submit: LLM-enhanced error explanations from application validation errors
+        window.addEventListener("message", (event) => {
+          if (event.source !== window) return
+          if (event.data?.type !== "vv:form:error:suggestions") return
+
+          const { suggestions, summary } = event.data
+          if (!suggestions) return
+
+          this.clearFieldHints()
+          Object.entries(suggestions).forEach(([fieldName, hint]) => {
+            const input = this.element.querySelector(`[data-field="${fieldName}"]`)
+            if (!input) return
+            const fieldDiv = input.closest(".app-form__field")
+            if (fieldDiv) {
+              fieldDiv.classList.add("app-form__field--error")
+              const hintEl = document.createElement("div")
+              hintEl.className = "app-form__field-hint"
+              hintEl.textContent = hint
+              fieldDiv.appendChild(hintEl)
+            }
+          })
+
+          const status = document.getElementById("form-status")
+          if (status && summary) { status.textContent = summary; status.style.color = "#e67e22" }
         })
 
         btn.addEventListener("click", () => {
@@ -773,6 +938,7 @@ after_bundle do
             return
           }
 
+          this.clearFieldHints()
           if (status) { status.textContent = "Validating..."; status.style.color = "#667eea" }
           btn.disabled = true
 
@@ -793,6 +959,121 @@ after_bundle do
           // Re-enable after timeout in case no response
           setTimeout(() => { btn.disabled = false }, 15000)
         })
+      }
+
+      // Application logic: submit form data and handle validation errors
+      // In production, this would POST to a Rails controller.
+      // When the controller returns errors, send them to the LLM for explanation.
+      submitToApplication() {
+        const fields = this.getFormFields()
+        const currentUser = this.currentUserValue || "Unknown"
+        const btn = document.getElementById("form-send")
+        const status = document.getElementById("form-status")
+
+        // Simulated application validation (replace with real POST in production)
+        // Example: POST /beneficiaries, controller returns { errors: { first_name: ["can't match account holder"] } }
+        const errors = this.simulateAppValidation(fields, currentUser)
+
+        if (Object.keys(errors).length === 0) {
+          // No errors — application accepted the submission
+          if (status) { status.textContent = "Submitted!"; status.style.color = "#28a745" }
+          if (btn) btn.disabled = false
+        } else {
+          // Application returned field errors — send to LLM for explanation
+          if (status) { status.textContent = "Resolving errors..."; status.style.color = "#e67e22" }
+          window.postMessage({
+            type: "vv:event",
+            event: "form:errors",
+            data: {
+              formTitle: "Beneficiary",
+              currentUser,
+              fields,
+              errors
+            }
+          }, "*")
+          if (btn) btn.disabled = false
+        }
+      }
+
+      // Simulated application validation — returns { field_name: ["error message", ...] }
+      // In production, this comes from your Rails controller's model.errors
+      simulateAppValidation(fields, currentUser) {
+        const errors = {}
+        const firstName = (fields.first_name?.value || "").trim()
+        const lastName = (fields.last_name?.value || "").trim()
+        const fullName = `${firstName} ${lastName}`
+
+        // Business rule: beneficiary cannot be the account holder
+        if (fullName.toLowerCase() === currentUser.toLowerCase()) {
+          errors.first_name = ["cannot be the same as the account holder"]
+          errors.last_name = ["cannot be the same as the account holder"]
+        }
+
+        return errors
+      }
+
+      clearFieldHints() {
+        this.element.querySelectorAll(".app-form__field--error").forEach(el => el.classList.remove("app-form__field--error"))
+        this.element.querySelectorAll(".app-form__field-hint").forEach(el => el.remove())
+      }
+
+      // --- Field Help: '?' trigger ---
+      setupFieldHelp() {
+        this.element.querySelectorAll("[data-field]").forEach(input => {
+          input.addEventListener("input", (e) => {
+            if (e.target.value === "?") {
+              e.target.value = ""
+              const fieldName = e.target.getAttribute("data-field")
+              const label = this.element.querySelector(`label[for="${e.target.id}"]`)?.textContent || fieldName
+
+              window.postMessage({
+                type: "vv:event",
+                event: "field:help",
+                data: {
+                  fieldName: fieldName,
+                  fieldLabel: label,
+                  formTitle: "Beneficiary",
+                  fields: this.getFormFields()
+                }
+              }, "*")
+
+              // Show loading hint
+              const fieldDiv = e.target.closest(".app-form__field")
+              if (fieldDiv) {
+                this.clearFieldHelp(fieldDiv)
+                const hint = document.createElement("div")
+                hint.className = "app-form__field-help"
+                hint.textContent = "Loading..."
+                fieldDiv.appendChild(hint)
+              }
+            }
+          })
+        })
+
+        // Listen for help responses
+        window.addEventListener("message", (event) => {
+          if (event.source !== window) return
+          if (event.data?.type !== "vv:field:help:response") return
+
+          const { fieldName, help } = event.data
+          if (!fieldName || !help) return
+
+          const input = this.element.querySelector(`[data-field="${fieldName}"]`)
+          if (!input) return
+
+          const fieldDiv = input.closest(".app-form__field")
+          if (fieldDiv) {
+            this.clearFieldHelp(fieldDiv)
+            const hint = document.createElement("div")
+            hint.className = "app-form__field-help"
+            hint.textContent = help
+            fieldDiv.appendChild(hint)
+          }
+        })
+      }
+
+      clearFieldHelp(fieldDiv) {
+        fieldDiv.querySelectorAll(".app-form__field-help").forEach(el => el.remove())
       }
     }
   JS
@@ -826,6 +1107,13 @@ after_bundle do
     .app-form__submit { width: 100%; padding: 14px; background: linear-gradient(135deg, #667eea, #764ba2); color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 8px; transition: opacity 0.2s; }
     .app-form__submit:hover { opacity: 0.9; }
     .app-form__status { text-align: center; margin-top: 12px; font-size: 14px; color: #28a745; min-height: 20px; }
+
+    /* Field error state (post-submit suggestions) */
+    .app-form__field--error input { border-color: #e67e22; background: #fef9f3; }
+    .app-form__field-hint { font-size: 13px; color: #e67e22; margin-top: 4px; padding-left: 2px; }
+
+    /* Field help (? trigger) */
+    .app-form__field-help { font-size: 13px; color: #667eea; margin-top: 4px; padding-left: 2px; font-style: italic; }
 
     /* No Plugin Notice */
     .no-plugin { display: none; text-align: center; margin-top: 20px; color: #888; font-size: 14px; }

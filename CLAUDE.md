@@ -41,7 +41,7 @@ Session   1 ──→ N  Turn ────────────────�
 | `models` | Per-provider model: api_model_id, context_window, capabilities (json) |
 | `presets` | Named inference params: temperature, max_tokens, system_prompt, top_p, parameters (json) |
 | `sessions` | Groups messages and turns |
-| `messages` | Context entries: role (user/assistant/system), message_type (user_input/navigation/data_query/form_state/form_open/form_poll) |
+| `messages` | Context entries: role (user/assistant/system), message_type (user_input/navigation/data_query/form_state/form_open/form_poll/form_error/field_help) |
 | `turns` | One LLM request/response: model, preset, message_history snapshot (json), request, completion, token counts |
 | `api_tokens` | Host only — Bearer token auth via BCrypt |
 
@@ -53,15 +53,24 @@ Extends classic Rails form lifecycle (render → submit → validate → respond
 CLASSIC:  GET /new → render ─────────────────────────→ POST /create → validate → redirect
                              (server is blind)
 
-VV:       GET /    → render → open → poll → type → poll → submit → LLM validate → result
-                              │       │      │      │      │
-                              Message  Msg   Msg    Msg    Turn + Messages
-                              (open)  (poll) (state)(poll)  (snapshot + completion)
+VV:       GET /    → render → open → poll → type → poll → submit → LLM pre-validate → app submit
+                              │       │      │      │      │         Turn 1              │
+                              Message  Msg   Msg    Msg    Turn + Messages           app errors?
+                              (open)  (poll) (state)(poll)  (snapshot + completion)      │
+                                                                                    form_error msg
+                                                                                    Turn 2 (error_resolution)
+                                                                                    LLM-enhanced suggestions
+
+FIELD HELP:  user types '?' in field → field_help message → Turn (field_help) → help text below field
 ```
 
-**Form lifecycle:** `GET /` renders form → `form:open` records form appearance → `form:poll` heartbeats every 5s (with focused_field) → `chat:typing` persists form_state on changes → `form:submit` creates Turn with message_history snapshot → `llm:request`/`llm:response` completes Turn → `form:submit:result` pushed to client.
+**Pre-submit turn:** `form:submit` creates Turn with message_history snapshot → LLM validates → `form:submit:result`. If LLM approves, form submits to application logic.
 
-**Single-table timeline:** `session.messages.order(:created_at)` gives you the full temporal view. No joins. Detect patterns like "paused 12s between field 3 and 4" by comparing form_poll timestamps and focused_field values.
+**Post-submit turn:** Application validates → returns per-field errors → `form:errors` event → `form_error` message recorded → Turn created → LLM translates raw errors into plain-language fix suggestions → `form:error:suggestions` pushed to client with per-field hints.
+
+**Field help:** User types `?` as first character in any field → `field:help` event → `field_help` message recorded → Turn created → LLM explains the field → `field:help:response` pushed to client with contextual help text.
+
+**Single-table timeline:** `session.messages.order(:created_at)` gives you the full temporal view. No joins. Detect patterns like "paused 12s between field 3 and 4" by comparing form_poll timestamps and focused_field values. `form_error` and `field_help` entries show where users struggled.
 
 **Complexity stays in Host/EventBus.** Client fires simple events. Server handles session lookup, message persistence, model selection, prompt assembly, turn tracking, result dispatch.
 

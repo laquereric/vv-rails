@@ -111,7 +111,13 @@ after_bundle do
   generate "migration", "CreateModels provider:references name:string api_model_id:string context_window:integer capabilities:json active:boolean"
   generate "migration", "CreatePresets model:references name:string temperature:float max_tokens:integer system_prompt:text top_p:float parameters:json active:boolean"
   generate "migration", "CreateMessages session:references role:string message_type:string content:text metadata:json"
-  generate "migration", "CreateTurns session:references model:references preset:references message_history:json request:text completion:text input_tokens:integer output_tokens:integer duration_ms:integer"
+  generate "migration", "CreateTurns session:references model:references message_history:json request:text completion:text input_tokens:integer output_tokens:integer duration_ms:integer"
+  # Add preset as a nullable reference (preset is optional on Turn)
+  turns_migration = Dir.glob("db/migrate/*_create_turns.rb").first
+  inject_into_file turns_migration, after: "t.references :model, null: false, foreign_key: true\n" do
+    "      t.references :preset, null: true, foreign_key: true\n"
+  end
+
   generate "migration", "CreateApiTokens token_digest:string:index label:string expires_at:datetime"
 
   # --- Models ---
@@ -195,7 +201,7 @@ after_bundle do
       belongs_to :session
 
       ROLES = %w[user assistant system].freeze
-      MESSAGE_TYPES = %w[user_input navigation data_query form_state form_open form_poll].freeze
+      MESSAGE_TYPES = %w[user_input navigation data_query form_state form_open form_poll form_error field_help].freeze
 
       validates :role, inclusion: { in: ROLES }
       validates :message_type, inclusion: { in: MESSAGE_TYPES }
