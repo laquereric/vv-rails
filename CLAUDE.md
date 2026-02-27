@@ -74,6 +74,21 @@ FIELD HELP:  user types '?' in field → field_help message → Turn (field_help
 
 **Complexity stays in Host/EventBus.** Client fires simple events. Server handles session lookup, message persistence, model selection, prompt assembly, turn tracking, result dispatch.
 
+## Rake tasks
+
+Both host and example apps include timeline inspection tasks:
+
+```bash
+rails message:timeline:log                  # chronological message timeline (latest session)
+rails message:timeline:log SESSION_ID=3     # specific session
+rails message:timeline:analysis             # pattern analysis (latest session)
+rails message:timeline:analysis SESSION_ID=3
+```
+
+**`message:timeline:log`** — Messages in order with timestamps, types, roles, metadata (focused_field, fields_filled, form_title), plus turn details (model, preset, tokens, duration, request/completion).
+
+**`message:timeline:analysis`** — Duration, message type breakdown, form lifecycle stats (opens, polls, state saves, errors, help requests), pause detection (gaps >10s), field focus order with time-on-field, field help requests, application validation errors parsed from form_error content, turn token/duration summary.
+
 ## VvChannel API
 
 ```ruby
