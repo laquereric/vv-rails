@@ -12,6 +12,7 @@
 # --- Gems ---
 
 gem "vv-rails", path: "vendor/vv-rails"
+gem "vv-browser-manager", path: "vendor/vv-browser-manager"
 gem "rails_event_store"
 gem "bcrypt", "~> 3.1"
 

@@ -9,11 +9,7 @@ module Vv
         end
       end
 
-      initializer "vv_rails.routes" do |app|
-        app.routes.append do
-          mount Vv::Rails::Engine => "/vv"
-        end
-      end
+      # Route mounting moved to vv-browser-manager gem (mounts /vv)
     end
   end
 end
