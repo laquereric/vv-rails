@@ -41,6 +41,48 @@ initializer "vv_rails.rb", <<~RUBY
 
   # --- EventBus handlers ---
 
+  Vv::Rails::EventBus.on("form:open") do |data, context|
+    channel = context[:channel]
+    session = vv_session_for(channel)
+    form_title = data["formTitle"] || "Form"
+    fields = data["fields"] || {}
+
+    session.messages.create!(
+      role: "system",
+      message_type: "form_open",
+      content: fields.to_json,
+      metadata: { event: "form:open", form_title: form_title, opened_at: Time.current.iso8601 }
+    )
+
+    Rails.logger.info "[vv] form opened: \#{form_title} with \#{fields.keys.length} fields"
+  end
+
+  Vv::Rails::EventBus.on("form:poll") do |data, context|
+    channel = context[:channel]
+    session = vv_session_for(channel)
+    fields = data["fields"] || {}
+    form_title = data["formTitle"] || "Form"
+
+    # Build field completion summary
+    filled = fields.count { |_, info| info["value"].to_s.strip.present? }
+    total = fields.length
+    focused = data["focusedField"]
+
+    session.messages.create!(
+      role: "system",
+      message_type: "form_poll",
+      content: fields.to_json,
+      metadata: {
+        event: "form:poll",
+        form_title: form_title,
+        fields_filled: filled,
+        fields_total: total,
+        focused_field: focused,
+        polled_at: Time.current.iso8601
+      }
+    )
+  end
+
   Vv::Rails::EventBus.on("chat:typing") do |data, context|
     channel = context[:channel]
     session = vv_session_for(channel)
@@ -380,7 +422,7 @@ after_bundle do
       belongs_to :session
 
       ROLES = %w[user assistant system].freeze
-      MESSAGE_TYPES = %w[user_input navigation data_query form_state].freeze
+      MESSAGE_TYPES = %w[user_input navigation data_query form_state form_open form_poll].freeze
 
       validates :role, inclusion: { in: ROLES }
       validates :message_type, inclusion: { in: MESSAGE_TYPES }
@@ -547,7 +589,15 @@ after_bundle do
 
       connect() {
         this.pluginDetected = false
+        this.pollTimer = null
         this.detectPlugin()
+      }
+
+      disconnect() {
+        if (this.pollTimer) {
+          clearInterval(this.pollTimer)
+          this.pollTimer = null
+        }
       }
 
       // --- Plugin Detection ---
@@ -604,6 +654,54 @@ after_bundle do
         window.postMessage({ type: "vv:chatbox:show" }, "*")
 
         this.setupFormSubmit()
+        this.emitFormOpen()
+        this.startFormPolling()
+      }
+
+      // --- Form Lifecycle: open + polling ---
+
+      getFormFields() {
+        const fields = {}
+        this.element.querySelectorAll("[data-field]").forEach(input => {
+          const name = input.getAttribute("data-field")
+          const label = this.element.querySelector(`label[for="${input.id}"]`)?.textContent || name
+          fields[name] = { label, value: input.value || "" }
+        })
+        return fields
+      }
+
+      getFocusedField() {
+        const active = document.activeElement
+        if (active?.hasAttribute("data-field")) {
+          return active.getAttribute("data-field")
+        }
+        return null
+      }
+
+      emitFormOpen() {
+        window.postMessage({
+          type: "vv:event",
+          event: "form:open",
+          data: {
+            formTitle: "Beneficiary",
+            fields: this.getFormFields()
+          }
+        }, "*")
+      }
+
+      startFormPolling() {
+        // Poll every 5 seconds
+        this.pollTimer = setInterval(() => {
+          window.postMessage({
+            type: "vv:event",
+            event: "form:poll",
+            data: {
+              formTitle: "Beneficiary",
+              fields: this.getFormFields(),
+              focusedField: this.getFocusedField()
+            }
+          }, "*")
+        }, 5000)
       }
 
       onNoPlugin() {

@@ -41,7 +41,7 @@ Session   1 ──→ N  Turn ────────────────�
 | `models` | Per-provider model: api_model_id, context_window, capabilities (json) |
 | `presets` | Named inference params: temperature, max_tokens, system_prompt, top_p, parameters (json) |
 | `sessions` | Groups messages and turns |
-| `messages` | Context entries: role (user/assistant/system), message_type (user_input/navigation/data_query/form_state) |
+| `messages` | Context entries: role (user/assistant/system), message_type (user_input/navigation/data_query/form_state/form_open/form_poll) |
 | `turns` | One LLM request/response: model, preset, message_history snapshot (json), request, completion, token counts |
 | `api_tokens` | Host only — Bearer token auth via BCrypt |
 
@@ -50,15 +50,18 @@ Session   1 ──→ N  Turn ────────────────�
 Extends classic Rails form lifecycle (render → submit → validate → respond) with an ActionCable middle phase where the server observes the form being filled and accumulates context.
 
 ```
-CLASSIC:  GET /new → render ──────────────────→ POST /create → validate → redirect
-                              (server blind)
+CLASSIC:  GET /new → render ─────────────────────────→ POST /create → validate → redirect
+                             (server is blind)
 
-VV:       GET /    → render ── typing ─ typing → submit → LLM validate → result
-                               Messages build    Turn captures request/completion
-                               context live       message_history snapshot preserved
+VV:       GET /    → render → open → poll → type → poll → submit → LLM validate → result
+                              │       │      │      │      │
+                              Message  Msg   Msg    Msg    Turn + Messages
+                              (open)  (poll) (state)(poll)  (snapshot + completion)
 ```
 
-**Form submit sequence:** `GET /` renders form → `chat:typing` persists form_state Messages → `form:submit` creates Turn with message_history snapshot → `llm:request` sent to plugin/provider → `llm:response` completes Turn → `form:submit:result` pushed to client.
+**Form lifecycle:** `GET /` renders form → `form:open` records form appearance → `form:poll` heartbeats every 5s (with focused_field) → `chat:typing` persists form_state on changes → `form:submit` creates Turn with message_history snapshot → `llm:request`/`llm:response` completes Turn → `form:submit:result` pushed to client.
+
+**Single-table timeline:** `session.messages.order(:created_at)` gives you the full temporal view. No joins. Detect patterns like "paused 12s between field 3 and 4" by comparing form_poll timestamps and focused_field values.
 
 **Complexity stays in Host/EventBus.** Client fires simple events. Server handles session lookup, message persistence, model selection, prompt assembly, turn tracking, result dispatch.
 

@@ -195,7 +195,7 @@ after_bundle do
       belongs_to :session
 
       ROLES = %w[user assistant system].freeze
-      MESSAGE_TYPES = %w[user_input navigation data_query form_state].freeze
+      MESSAGE_TYPES = %w[user_input navigation data_query form_state form_open form_poll].freeze
 
       validates :role, inclusion: { in: ROLES }
       validates :message_type, inclusion: { in: MESSAGE_TYPES }
