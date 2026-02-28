@@ -1,0 +1,124 @@
+# Vv Composer Profiles
+#
+# Each profile defines:
+#   modules  — ordered list of modules to apply (dependency-safe order)
+#   config   — instance variables set before module application
+#
+# Usage:
+#   VV_PROFILE=host rails new myapp -m templates/composer.rb
+#   VV_MODULES=base,cors,api_rest rails new myapp -m templates/composer.rb
+
+host:
+  modules:
+    - base
+    - cors
+    - memory
+    - schema_llm
+    - schema_session
+    - schema_res
+    - auth_token
+    - api_rest
+    - api_relay
+    - seeds_providers
+  config:
+    vv_channel_prefix: vv
+    vv_cable_url: "ws://localhost:3001/cable"
+    cors_resources:
+      - "/v1/*"
+      - "/api/*"
+      - "/vv/*"
+
+example:
+  modules:
+    - base
+    - memory
+    - schema_llm
+    - schema_session
+    - schema_res
+    - events_form_lifecycle
+    - events_browser_manager
+    - seeds_webllm
+  config:
+    vv_channel_prefix: vv
+    vv_cable_url: "ws://localhost:3003/cable"
+
+mobile:
+  modules:
+    - base
+    - schema_settings
+    - client_llama_stack
+  config:
+    vv_channel_prefix: vv
+
+platform_manager:
+  modules:
+    - base
+    - schema_hosts
+    - api_containers
+  config:
+    vv_channel_prefix: vv_platform
+
+local_provider:
+  modules:
+    - base
+    - cors
+    - schema_res
+    - events_llm_bridge
+  config:
+    vv_channel_prefix: vv
+    vv_cable_url: "ws://localhost:3004/cable"
+    cors_resources:
+      - "/vv/*"
+      - "/health"
+      - "/cable"
+
+full:
+  modules:
+    - base
+    - cors
+    - memory
+    - schema_llm
+    - schema_session
+    - schema_res
+    - schema_settings
+    - auth_token
+    - api_rest
+    - api_relay
+    - events_form_lifecycle
+    - events_browser_manager
+    - events_llm_bridge
+    - client_llama_stack
+    - seeds_providers
+    - seeds_webllm
+  config:
+    vv_channel_prefix: vv
+    vv_cable_url: "ws://localhost:3000/cable"
+    cors_resources:
+      - "/v1/*"
+      - "/api/*"
+      - "/vv/*"
+
+api_only:
+  modules:
+    - base
+    - cors
+    - schema_llm
+    - schema_session
+    - schema_res
+    - auth_token
+    - api_rest
+    - api_relay
+    - seeds_providers
+  config:
+    vv_channel_prefix: vv
+    vv_cable_url: "ws://localhost:3000/cable"
+    cors_resources:
+      - "/v1/*"
+      - "/api/*"
+
+local:
+  modules:
+    - base
+    - events_llm_bridge
+  config:
+    vv_channel_prefix: vv
