@@ -37,6 +37,7 @@ example:
     - schema_res
     - events_form_lifecycle
     - events_browser_manager
+    - ui_example_form
     - seeds_webllm
   config:
     vv_channel_prefix: vv
@@ -47,6 +48,7 @@ mobile:
     - base
     - schema_settings
     - client_llama_stack
+    - ui_chat
   config:
     vv_channel_prefix: vv
 
@@ -55,6 +57,7 @@ platform_manager:
     - base
     - schema_hosts
     - api_containers
+    - ui_dashboard
   config:
     vv_channel_prefix: vv_platform
 
@@ -81,13 +84,18 @@ full:
     - schema_session
     - schema_res
     - schema_settings
+    - schema_hosts
     - auth_token
     - api_rest
     - api_relay
+    - api_containers
     - events_form_lifecycle
     - events_browser_manager
     - events_llm_bridge
     - client_llama_stack
+    - ui_example_form
+    - ui_chat
+    - ui_dashboard
     - seeds_providers
     - seeds_webllm
   config:
