@@ -815,5 +815,12 @@ after_bundle do
       h.cable_url = "ws://localhost:3001/cable"
       h.active = true
     end
+
+    # Public host: VerticalVertical.net
+    HostInstance.find_or_create_by!(name: "VerticalVertical.net") do |h|
+      h.url = "https://verticalvertical.net"
+      h.cable_url = "wss://verticalvertical.net/cable"
+      h.active = true
+    end
   RUBY
 end
