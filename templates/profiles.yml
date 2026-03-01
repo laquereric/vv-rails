@@ -87,6 +87,7 @@ individual:
     - subscription
     - metering
     - auth_user
+    - authorization
     - api_rest
     - api_relay
     - client_llama_stack
@@ -113,6 +114,7 @@ full:
     - subscription
     - metering
     - auth_user
+    - authorization
     - api_rest
     - api_relay
     - api_containers
