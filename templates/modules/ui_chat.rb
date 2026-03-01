@@ -718,10 +718,10 @@ after_bundle do
   # --- Mobile CSS ---
 
   file "app/assets/stylesheets/mobile.css", <<~CSS
-    /* Reset & Base */
+    /* Reset & Base — inherits from DS foundation when ui_design_system is loaded */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html { font-size: 16px; -webkit-text-size-adjust: 100%; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #333; min-height: 100vh; min-height: -webkit-fill-available; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+    body { font-family: var(--vv-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif); background: var(--vv-background, #f5f5f5); color: var(--pm-text, #333); min-height: 100vh; min-height: -webkit-fill-available; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
 
     /* Header */
     .mobile-header { position: sticky; top: 0; z-index: 100; background: #007bff; color: white; padding: 0 16px; padding-top: env(safe-area-inset-top); }

@@ -103,12 +103,12 @@ after_bundle do
       end.join("\n")
 
       app_context = {
-        "description" => "Beneficiary designation form. The current user (John Jones) is designating a beneficiary. Fields: First Name, Last Name, and E Pluribus Unum (the national motto of the United States, meaning 'Out of many, one'). A beneficiary is a person designated to receive benefits from an account, policy, or trust. Typically this should be someone OTHER than the account holder.",
+        "description" => "Insurance beneficiary designation form. The current user (account holder: John Jones) is designating a person to receive benefits. Fields: First Name, Last Name, Date of Birth, SSN (Social Security Number, masked after entry), Address (mailing address for correspondence), Relationship (spouse/child/parent/sibling/other), Percentage (benefit allocation 1-100%), Contingent (checkbox: receives benefits only if primary beneficiary is unavailable). The beneficiary must be someone OTHER than the account holder. Spouse designation requires age 18+.",
         "currentUser" => "John Jones",
-        "formTitle" => "Beneficiary",
+        "formTitle" => "Beneficiary Designation",
         "formFields" => form_fields,
         "formSummary" => field_summary,
-        "instructions" => "When the user asks about a field, explain why it is needed in the context of a beneficiary designation. If a required field is empty, mention that it still needs to be filled in. Be helpful and concise."
+        "instructions" => "When the user asks about a field, explain why it is needed in the context of an insurance beneficiary designation. Reference legal, regulatory, or practical reasons. If a required field is empty, mention that it still needs to be filled in. Be helpful and concise."
       }
       channel.emit("chat:context:analyze", {
         pageContent: page_content, appContext: app_context
@@ -158,104 +158,6 @@ after_bundle do
         event_trigger: "form:submit"
       }))
 
-      # Check for easter egg
-      epu_value = fields.dig("e_pluribus_unum", "value").to_s
-      if epu_value.downcase.strip == "easter egg"
-        first_name = fields.dig("first_name", "value").to_s
-        last_name = fields.dig("last_name", "value").to_s
-
-        easter_egg_html = <<~HTML
-          <div class="vv-rich__header">
-            <span class="vv-rich__badge"><svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 100 100">
-              <defs>
-                <linearGradient id="egg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" style="stop-color:#f6d365"/>
-                  <stop offset="50%" style="stop-color:#fda085"/>
-                  <stop offset="100%" style="stop-color:#f6d365"/>
-                </linearGradient>
-                <linearGradient id="band-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" style="stop-color:#667eea"/>
-                  <stop offset="100%" style="stop-color:#764ba2"/>
-                </linearGradient>
-              </defs>
-              <ellipse cx="50" cy="55" rx="32" ry="40" fill="url(#egg-grad)" stroke="#e0a030" stroke-width="2"/>
-              <path d="M 18 50 Q 50 35, 82 50" fill="none" stroke="url(#band-grad)" stroke-width="5" stroke-linecap="round"/>
-              <path d="M 22 60 Q 50 75, 78 60" fill="none" stroke="url(#band-grad)" stroke-width="3" stroke-linecap="round" opacity="0.6"/>
-              <circle cx="38" cy="45" r="3" fill="#764ba2" opacity="0.7"/>
-              <circle cx="58" cy="42" r="4" fill="#667eea" opacity="0.7"/>
-              <circle cx="50" cy="58" r="2.5" fill="#f6d365" opacity="0.8"/>
-              <circle cx="42" cy="65" r="2" fill="#fda085" opacity="0.6"/>
-              <circle cx="62" cy="55" r="3" fill="#764ba2" opacity="0.5"/>
-              <text x="50" y="12" text-anchor="middle" font-size="14">&#10024;</text>
-            </svg></span>
-            <span class="vv-rich__header-text">Easter Egg Found!</span>
-          </div>
-
-          <div class="vv-rich__body">
-            Congratulations, <strong>#{first_name} #{last_name}</strong>! You discovered the hidden easter egg
-            in the Beneficiary form. <em>E Pluribus Unum</em> &mdash; "Out of many, one" &mdash; is the motto on
-            the Great Seal of the United States, symbolizing the union of states and people into one nation.
-          </div>
-
-          <div class="vv-rich__divider"></div>
-
-          <img class="vv-rich__image"
-               src="https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/Greater_coat_of_arms_of_the_United_States.svg/600px-Greater_coat_of_arms_of_the_United_States.svg.png"
-               alt="Great Seal of the United States"
-               onerror="this.style.display='none'">
-
-          <div class="vv-rich__body" style="font-size: 13px; opacity: 0.9;">
-            The phrase first appeared on the <em>Fugio cent</em> (1787), the first official U.S. coin,
-            and has been featured on the Great Seal since 1782. It was the de facto national motto until
-            1956, when "In God We Trust" was officially adopted.
-          </div>
-
-          <div class="vv-rich__divider"></div>
-
-          <div class="vv-rich__links">
-            <a class="vv-rich__link vv-rich__link--primary"
-               href="https://en.wikipedia.org/wiki/E_pluribus_unum"
-               target="_blank" rel="noopener">
-              &#128214; Wikipedia
-            </a>
-            <a class="vv-rich__link vv-rich__link--secondary"
-               href="https://www.greatseal.com/mottoes/unum.html"
-               target="_blank" rel="noopener">
-              &#127963;&#65039; Great Seal History
-            </a>
-            <a class="vv-rich__link vv-rich__link--secondary"
-               href="https://github.com/laquereric/vv-plugin"
-               target="_blank" rel="noopener">
-              &#9889; Vv Plugin
-            </a>
-          </div>
-
-          <div class="vv-rich__divider"></div>
-
-          <div class="vv-rich__footer">
-            Discovered by #{current_user}
-          </div>
-        HTML
-
-        model = vv_model
-        if model
-          message_history = session.messages_from_events
-          Turn.create!(
-            session: session,
-            model: model,
-            preset: vv_preset,
-            message_history: message_history,
-            request: "easter_egg",
-            completion: "Easter egg found by #{first_name} #{last_name}"
-          )
-        end
-
-        channel.emit("sidebar:open", {})
-        channel.emit("sidebar:message", { html: easter_egg_html })
-        channel.emit("form:submit:result", { ok: true, answer: "egg", explanation: "" })
-        next
-      end
-
       # Normal validation
       field_summary = (fields || {}).map do |key, info|
         label = info["label"] || key
@@ -267,7 +169,7 @@ after_bundle do
       messages = [
         {
           "role" => "system",
-          "content" => "You are a form validation assistant. The current logged-in user is \"#{current_user}\". A \"#{form_title}\" form has been filled out. A beneficiary is a person designated to receive benefits — typically someone OTHER than the account holder/current user.\n\nRespond ONLY with valid JSON: {\"answer\":\"yes\",\"explanation\":\"...\"} or {\"answer\":\"no\",\"explanation\":\"...\"}. The explanation should be 1-2 sentences. If the answer is \"no\", explain clearly what seems wrong (e.g. if the user designated themselves as their own beneficiary, explain what a beneficiary is and why they should designate someone else)."
+          "content" => "You are a form validation assistant for an insurance beneficiary designation form. The current logged-in user (account holder) is \"#{current_user}\". A beneficiary is a person designated to receive benefits — someone OTHER than the account holder.\n\nValidation rules:\n1. The beneficiary name must not match the account holder name.\n2. SSN must be in XXX-XX-XXXX format (9 digits).\n3. Date of birth cannot be in the future.\n4. If relationship is \"spouse\", the beneficiary must be 18 or older.\n5. Percentage must be between 1 and 100.\n6. Address should look like a real mailing address.\n\nSoft warnings (not blocking):\n- Percentage under 100 for a single beneficiary (they may intend multiple beneficiaries).\n- A minor child (under 18) may need a custodial arrangement.\n- Contingent beneficiary with 100% allocation is unusual.\n\nRespond ONLY with valid JSON:\n- If everything looks correct: {\"answer\":\"yes\",\"explanation\":\"...\",\"warnings\":{}}\n- If there are soft warnings but no blocking issues: {\"answer\":\"yes\",\"explanation\":\"...\",\"warnings\":{\"field_name\":\"warning text\",...}}\n- If there are blocking issues: {\"answer\":\"no\",\"explanation\":\"what is wrong\"}\n\nThe explanation should be 1-2 sentences. Field names in warnings must be: first_name, last_name, date_of_birth, ssn, address, relationship, percentage, contingent."
         },
         {
           "role" => "user",
@@ -311,12 +213,25 @@ after_bundle do
         fields: fields
       }))
 
+      # B2: Domain-specific field help prompts
+      field_help_supplements = {
+        "first_name" => "This is the beneficiary's legal first name as it appears on government-issued ID. Nicknames are not accepted. Hyphenated names should include the full hyphenated form.",
+        "last_name" => "This is the beneficiary's legal surname. For married beneficiaries, use their current legal name. Hyphenated surnames should be entered in full.",
+        "date_of_birth" => "Date of birth is used for identity verification and eligibility. A minor (under 18) may require a custodial arrangement. The date cannot be in the future.",
+        "ssn" => "Social Security Number is required by federal regulation for tax reporting on benefit distributions. Enter in XXX-XX-XXXX format. The number is automatically masked after entry for security.",
+        "address" => "This is the mailing address for benefit correspondence and distribution. PO Box addresses are acceptable. Include street, city, state, and ZIP code.",
+        "relationship" => "Legal relationship to the account holder. Spouses may have statutory rights in many states. 'Contingent' beneficiaries only receive benefits if the primary beneficiary predeceases or cannot be located.",
+        "percentage" => "Benefit allocation percentage. A single beneficiary should receive 100%. Multiple beneficiaries must total 100%. Common splits: 50/50 for two, 34/33/33 for three.",
+        "contingent" => "A contingent beneficiary receives benefits only if the primary beneficiary predeceases the account holder or cannot be located. If unchecked, this is a primary beneficiary designation."
+      }
+      supplement = field_help_supplements[field_name] || ""
+
       field_summary = fields.map { |k, info| "  - #{info['label'] || k}: \"#{info['value']}\"" }.join("\n")
       request_id = SecureRandom.hex(8)
       messages = [
         {
           "role" => "system",
-          "content" => "You are a form field assistant for a \"#{form_title}\" form. The user pressed '?' on the field \"#{field_label}\". Explain what this field is for and what to enter. Be concise (1-3 sentences). Respond ONLY with valid JSON: {\"help\": \"your explanation\"}"
+          "content" => "You are an insurance form field assistant for a \"#{form_title}\" form. The user pressed '?' on the field \"#{field_label}\". #{supplement} Explain what this field is for and what to enter. Be concise (1-3 sentences). Respond ONLY with valid JSON: {\"help\": \"your explanation\"}"
         },
         {
           "role" => "user",
@@ -444,9 +359,10 @@ after_bundle do
       else
         ok = (parsed["answer"] || "yes").to_s.downcase.start_with?("y")
         explanation = (parsed["explanation"] || raw).to_s
+        warnings = parsed["warnings"] || {}
 
         if ok
-          channel.emit("form:submit:result", { ok: true, answer: parsed["answer"], explanation: explanation })
+          channel.emit("form:submit:result", { ok: true, answer: parsed["answer"], explanation: explanation, warnings: warnings })
         else
           channel.emit("sidebar:open", {})
           channel.emit("sidebar:message", { content: explanation, label: "Form Review" })

@@ -12,10 +12,12 @@ after_bundle do
   # --- Routes ---
 
   route <<~RUBY
+    get "attention", to: "dashboard#attention"
     get "domains", to: "dashboard#domains"
     get "local", to: "dashboard#local"
     get "public", to: "dashboard#public_tab"
     get "deploy", to: "dashboard#deploy_tab"
+    get "planning", to: "dashboard#plans_tab"
     resources :host_instances, except: [:show]
   RUBY
 
@@ -28,7 +30,14 @@ after_bundle do
   file "app/controllers/dashboard_controller.rb", <<~RUBY
     class DashboardController < ApplicationController
       def index
-        redirect_to action: :domains
+        redirect_to action: :attention
+      end
+
+      def attention
+        @attention = AttentionService.collect
+        @attention_counts = AttentionService.counts
+        @active_tab = "attention"
+        render :dashboard
       end
 
       def domains
@@ -52,6 +61,12 @@ after_bundle do
       def deploy_tab
         @deploy_targets = defined?(DeployTarget) ? DeployTarget.active.order(:name) : []
         @active_tab = "deploy"
+        render :dashboard
+      end
+
+      def plans_tab
+        @plans = defined?(EnginePlanner::Plan) ? EnginePlanner::Plan.order(:status, :title) : []
+        @active_tab = "plans"
         render :dashboard
       end
     end
@@ -229,11 +244,23 @@ after_bundle do
         <header class="pm-header">
           <nav class="pm-nav">
             <a href="/" class="pm-nav__brand"><img src="/vv-logo.png" alt="Vv" style="height: 32px; vertical-align: middle; margin-right: 10px;">Platform Manager</a>
-            <div class="pm-nav__tabs">
+            <div class="pm-nav__tabs" data-controller="tab-badges">
+              <a href="/attention" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'attention' %>" data-tab-badges-target="tab" data-tab-path="/attention">
+                Attention<span class="pm-nav__badge" data-tab-badges-target="attentionBadge"></span>
+              </a>
               <a href="/domains" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'domains' %>">Domains</a>
-              <a href="/local" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'local' %>">Local</a>
-              <a href="/public" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'public' %>">Public</a>
-              <a href="/deploy" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'deploy' %>">Deploy</a>
+              <a href="/local" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'local' %>" data-tab-badges-target="tab" data-tab-path="/local">
+                Local<span class="pm-nav__badge" data-tab-badges-target="localBadge"></span>
+              </a>
+              <a href="/public" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'public' %>" data-tab-badges-target="tab" data-tab-path="/public">
+                Public<span class="pm-nav__badge" data-tab-badges-target="publicBadge"></span>
+              </a>
+              <a href="/deploy" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'deploy' %>" data-tab-badges-target="tab" data-tab-path="/deploy">
+                Deploy<span class="pm-nav__badge" data-tab-badges-target="deployBadge"></span>
+              </a>
+              <a href="/planning" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'plans' %>" data-tab-badges-target="tab" data-tab-path="/planning">
+                Plans<span class="pm-nav__badge" data-tab-badges-target="plansBadge"></span>
+              </a>
             </div>
             <div class="pm-nav__version">v0.10.0</div>
           </nav>
@@ -254,12 +281,16 @@ after_bundle do
 
   file "app/views/dashboard/dashboard.html.erb", <<~'ERB'
     <div class="dashboard" data-controller="dashboard" data-dashboard-active-tab-value="<%= @active_tab %>">
-      <% if @active_tab == "domains" %>
+      <% if @active_tab == "attention" %>
+        <%= render "dashboard/attention_panel" %>
+      <% elsif @active_tab == "domains" %>
         <%= render "dashboard/domains_panel" %>
       <% elsif @active_tab == "local" %>
         <%= render "dashboard/local_panel" %>
       <% elsif @active_tab == "deploy" %>
         <%= render "dashboard/deploy_panel" if defined?(DeployTarget) %>
+      <% elsif @active_tab == "plans" %>
+        <%= render "dashboard/plans_panel" %>
       <% else %>
         <%= render "dashboard/public_panel" %>
       <% end %>
@@ -461,6 +492,97 @@ after_bundle do
       <h2>Edit Remote Host</h2>
       <%= render "form" %>
     </div>
+  ERB
+
+  # --- Attention panel partial ---
+
+  file "app/views/dashboard/_attention_panel.html.erb", <<~'ERB'
+    <div data-controller="attention">
+      <div class="panel-header">
+        <h2>Attention</h2>
+        <div class="attention-summary">
+          <% if @attention_counts[:critical] > 0 %>
+            <span class="attention-count attention-count--critical"><%= @attention_counts[:critical] %> critical</span>
+          <% end %>
+          <% if @attention_counts[:warning] > 0 %>
+            <span class="attention-count attention-count--warning"><%= @attention_counts[:warning] %> warning</span>
+          <% end %>
+          <% if @attention_counts[:info] > 0 %>
+            <span class="attention-count attention-count--info"><%= @attention_counts[:info] %> info</span>
+          <% end %>
+        </div>
+      </div>
+
+      <div class="attention-grid" data-attention-target="grid">
+        <% if @attention.empty? %>
+          <div class="empty-state">
+            <p>No items need attention.</p>
+            <p class="empty-state__hint">All systems healthy.</p>
+          </div>
+        <% else %>
+          <% @attention.each do |item| %>
+            <div class="attention-card attention-card--<%= item.severity %>">
+              <div class="attention-card__header">
+                <span class="attention-card__source"><%= item.source %></span>
+                <span class="attention-card__severity attention-card__severity--<%= item.severity %>"><%= item.severity %></span>
+              </div>
+              <div class="attention-card__title"><%= item.title %></div>
+              <div class="attention-card__message"><%= item.message %></div>
+            </div>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  ERB
+
+  # --- P3: Plans panel partial ---
+
+  file "app/views/dashboard/_plans_panel.html.erb", <<~'ERB'
+    <div class="panel-header">
+      <h2>Plans</h2>
+      <% if defined?(EnginePlanner) %>
+        <a href="/plans" class="btn btn--secondary" target="_blank">Open Planner</a>
+      <% end %>
+    </div>
+
+    <% if @plans.respond_to?(:any?) && @plans.any? %>
+      <div class="plans-kanban">
+        <% %w[input plan in_progress for_review done].each do |status| %>
+          <% plans_in_status = @plans.select { |p| p.status == status } %>
+          <div class="plans-column">
+            <div class="plans-column__header">
+              <span class="plans-column__title"><%= status.humanize %></span>
+              <span class="plans-column__count"><%= plans_in_status.count %></span>
+            </div>
+            <% plans_in_status.each do |plan| %>
+              <div class="plans-card">
+                <div class="plans-card__title"><%= plan.title %></div>
+                <% if plan.respond_to?(:description) && plan.description.present? %>
+                  <div class="plans-card__desc"><%= plan.description.truncate(100) %></div>
+                <% end %>
+                <div class="plans-card__meta">
+                  <span><%= plan.perspectives.count rescue 0 %> perspectives</span>
+                  <span><%= plan.assertions.count rescue 0 %> assertions</span>
+                </div>
+              </div>
+            <% end %>
+            <% if plans_in_status.empty? %>
+              <div class="plans-card plans-card--empty">No plans</div>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    <% else %>
+      <div class="empty-state">
+        <% if defined?(EnginePlanner) %>
+          <p>No plans yet.</p>
+          <p class="empty-state__hint">Run <code>rails db:seed</code> to load initial plans, or create one in the <a href="/plans">Planner</a>.</p>
+        <% else %>
+          <p>Planning module not available.</p>
+          <p class="empty-state__hint">Add the <code>planning</code> module to your profile to enable.</p>
+        <% end %>
+      </div>
+    <% end %>
   ERB
 
   # --- Stimulus: dashboard controller ---
@@ -681,16 +803,127 @@ after_bundle do
     }
   JS
 
+  # --- Stimulus: attention controller ---
+
+  file "app/javascript/controllers/attention_controller.js", <<~JS
+    import { Controller } from "@hotwired/stimulus"
+
+    export default class extends Controller {
+      static targets = ["grid"]
+
+      connect() {
+        this.poll = setInterval(() => this.fetchAttention(), 5000)
+      }
+
+      disconnect() {
+        if (this.poll) clearInterval(this.poll)
+      }
+
+      async fetchAttention() {
+        try {
+          const response = await fetch("/api/attention")
+          if (!response.ok) return
+          const data = await response.json()
+          this.updateGrid(data.items)
+        } catch (e) {
+          // retry on next interval
+        }
+      }
+
+      updateGrid(items) {
+        if (!this.hasGridTarget) return
+
+        if (items.length === 0) {
+          this.gridTarget.innerHTML = `
+            <div class="empty-state">
+              <p>No items need attention.</p>
+              <p class="empty-state__hint">All systems healthy.</p>
+            </div>`
+          return
+        }
+
+        this.gridTarget.innerHTML = items.map(item => `
+          <div class="attention-card attention-card--${item.severity}">
+            <div class="attention-card__header">
+              <span class="attention-card__source">${item.source}</span>
+              <span class="attention-card__severity attention-card__severity--${item.severity}">${item.severity}</span>
+            </div>
+            <div class="attention-card__title">${item.title}</div>
+            <div class="attention-card__message">${item.message}</div>
+          </div>
+        `).join("")
+      }
+    }
+  JS
+
+  # --- Stimulus: tab-badges controller ---
+
+  file "app/javascript/controllers/tab_badges_controller.js", <<~JS
+    import { Controller } from "@hotwired/stimulus"
+
+    export default class extends Controller {
+      static targets = ["attentionBadge", "localBadge", "publicBadge", "deployBadge"]
+
+      connect() {
+        this.fetchBadges()
+        this.poll = setInterval(() => this.fetchBadges(), 5000)
+      }
+
+      disconnect() {
+        if (this.poll) clearInterval(this.poll)
+      }
+
+      async fetchBadges() {
+        try {
+          const response = await fetch("/api/attention")
+          if (!response.ok) return
+          const data = await response.json()
+          this.updateBadges(data)
+        } catch (e) {
+          // retry on next interval
+        }
+      }
+
+      updateBadges(data) {
+        const counts = data.counts
+        const actionable = counts.critical + counts.warning
+
+        this.setBadge(this.attentionBadgeTarget, actionable, counts.critical > 0 ? "critical" : "warning")
+
+        // Per-source badges
+        const items = data.items || []
+        const containerCount = items.filter(i => i.source === "containers" && i.severity !== "info").length
+        const hostCount = items.filter(i => i.source === "hosts" && i.severity !== "info").length
+        const deployCount = items.filter(i => i.source === "deploy" && i.severity !== "info").length
+
+        if (this.hasLocalBadgeTarget) this.setBadge(this.localBadgeTarget, containerCount, "warning")
+        if (this.hasPublicBadgeTarget) this.setBadge(this.publicBadgeTarget, hostCount, "warning")
+        if (this.hasDeployBadgeTarget) this.setBadge(this.deployBadgeTarget, deployCount, "warning")
+      }
+
+      setBadge(el, count, severity) {
+        if (!el) return
+        if (count === 0) {
+          el.textContent = ""
+          el.className = "pm-nav__badge"
+        } else {
+          el.textContent = count
+          el.className = `pm-nav__badge pm-nav__badge--${severity}`
+        }
+      }
+    }
+  JS
+
   # --- CSS ---
 
   file "app/assets/stylesheets/platform_manager.css", <<~CSS
-    /* Reset & Base */
+    /* Reset & Base — inherits from DS foundation when ui_design_system is loaded */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html { font-size: 16px; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f0f2f5; color: #333; min-height: 100vh; }
+    body { font-family: var(--vv-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif); background: var(--vv-background, #f0f2f5); color: var(--pm-text, #333); min-height: 100vh; }
 
     /* Header */
-    .pm-header { background: #1a1a2e; color: white; padding: 0 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); position: sticky; top: 0; z-index: 100; }
+    .pm-header { background: var(--pm-header-bg, #1a1a2e); color: var(--pm-header-text, white); padding: 0 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); position: sticky; top: 0; z-index: 100; }
     .pm-nav { display: flex; align-items: center; height: 56px; max-width: 1200px; margin: 0 auto; }
     .pm-nav__brand { color: white; text-decoration: none; font-size: 18px; font-weight: 700; margin-right: 32px; white-space: nowrap; }
     .pm-nav__tabs { display: flex; gap: 4px; flex: 1; }
@@ -710,7 +943,7 @@ after_bundle do
     .panel-header h2 { font-size: 22px; color: #1a1a2e; }
 
     /* Empty State */
-    .empty-state { text-align: center; padding: 60px 20px; background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .empty-state { text-align: center; padding: 60px 20px; background: var(--pm-surface, white); border-radius: var(--pm-radius, 8px); box-shadow: var(--pm-surface-shadow, 0 1px 3px rgba(0,0,0,0.08)); }
     .empty-state p { color: #666; font-size: 16px; margin-bottom: 8px; }
     .empty-state__hint { font-size: 14px; color: #999; }
     .empty-state code { background: #f0f2f5; padding: 2px 6px; border-radius: 3px; font-size: 13px; }
@@ -719,7 +952,7 @@ after_bundle do
     .container-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
 
     /* Container Card */
-    .container-card { background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border-left: 4px solid #ddd; transition: box-shadow 0.2s ease; }
+    .container-card { background: var(--pm-surface, white); border-radius: var(--pm-radius, 8px); padding: var(--pm-gap, 16px); box-shadow: var(--pm-surface-shadow, 0 1px 3px rgba(0,0,0,0.08)); border-left: 4px solid var(--pm-border, #ddd); transition: box-shadow 0.2s ease; }
     .container-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
     .container-card--running { border-left-color: #28a745; }
     .container-card--exited { border-left-color: #dc3545; }
@@ -784,6 +1017,47 @@ after_bundle do
     .status-dot--disconnected { background: #dc3545; }
     .status-dot--error { background: #dc3545; animation: pulse 1.5s infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* Attention Grid */
+    .attention-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 16px; }
+    .attention-summary { display: flex; gap: 8px; }
+    .attention-count { font-size: 13px; font-weight: 500; padding: 4px 10px; border-radius: 12px; }
+    .attention-count--critical { background: #f8d7da; color: #721c24; }
+    .attention-count--warning { background: #fff3cd; color: #856404; }
+    .attention-count--info { background: #cce5ff; color: #004085; }
+
+    /* Attention Card */
+    .attention-card { background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border-left: 4px solid #ddd; transition: box-shadow 0.2s ease; }
+    .attention-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+    .attention-card--critical { border-left-color: #dc3545; }
+    .attention-card--warning { border-left-color: #ffc107; }
+    .attention-card--info { border-left-color: #007bff; }
+    .attention-card__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .attention-card__source { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #888; }
+    .attention-card__severity { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 12px; }
+    .attention-card__severity--critical { background: #f8d7da; color: #721c24; }
+    .attention-card__severity--warning { background: #fff3cd; color: #856404; }
+    .attention-card__severity--info { background: #cce5ff; color: #004085; }
+    .attention-card__title { font-weight: 600; font-size: 15px; color: #1a1a2e; margin-bottom: 4px; }
+    .attention-card__message { font-size: 13px; color: #666; line-height: 1.4; }
+
+    /* Tab Badges */
+    .pm-nav__badge { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; font-size: 12px; font-weight: 600; border-radius: 10px; margin-left: 6px; padding: 0 5px; }
+    .pm-nav__badge:empty { display: none; }
+    .pm-nav__badge--critical { background: #dc3545; color: white; }
+    .pm-nav__badge--warning { background: #ffc107; color: #333; }
+
+    /* Plans Kanban */
+    .plans-kanban { display: flex; gap: 16px; overflow-x: auto; padding-bottom: 8px; }
+    .plans-column { flex: 1; min-width: 200px; background: #f8f9fa; border-radius: 8px; padding: 12px; }
+    .plans-column__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #dee2e6; }
+    .plans-column__title { font-size: 13px; font-weight: 600; text-transform: uppercase; color: #6c757d; letter-spacing: 0.5px; }
+    .plans-column__count { background: #dee2e6; color: #495057; border-radius: 10px; padding: 2px 8px; font-size: 12px; font-weight: 600; }
+    .plans-card { background: white; border: 1px solid #dee2e6; border-radius: 6px; padding: 12px; margin-bottom: 8px; }
+    .plans-card__title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+    .plans-card__desc { font-size: 13px; color: #6c757d; margin-bottom: 8px; }
+    .plans-card__meta { display: flex; gap: 12px; font-size: 12px; color: #adb5bd; }
+    .plans-card--empty { color: #adb5bd; font-size: 13px; text-align: center; border-style: dashed; }
 
     /* Buttons */
     .btn { display: inline-block; padding: 8px 16px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; text-decoration: none; text-align: center; transition: all 0.2s ease; background: white; color: #333; }
@@ -1037,17 +1311,46 @@ after_bundle do
     end
   RUBY
 
+  # --- C5: DriftAlertSource ---
+
+  file "app/services/drift_alert_source.rb", <<~'RUBY'
+    class DriftAlertSource
+      def check
+        return [] unless defined?(ManifestService)
+
+        ManifestService.detect_drift.flat_map do |container|
+          container[:issues]
+            .select { |i| i[:severity] != "info" }
+            .map do |issue|
+              severity = issue[:severity] == "high" ? "critical" : "warning"
+              AttentionItem.new(
+                source: "manifests",
+                severity: severity,
+                title: "#{container[:service]}: #{issue[:category].humanize}",
+                message: issue[:detail],
+                context: { service: container[:service], profile: container[:profile] }
+              )
+            end
+        end
+      rescue StandardError => e
+        Rails.logger.warn("[DriftAlertSource] #{e.message}")
+        []
+      end
+    end
+  RUBY
+
   # --- E1: Attention route ---
 
   route 'get "api/attention", to: "api/attention#index"'
 
-  # --- E1-E3: Register attention sources ---
+  # --- E1-E3, C5: Register attention sources ---
 
   initializer "attention_sources.rb", <<~RUBY
     Rails.application.config.after_initialize do
       AttentionService.register(:containers, ContainerAlertSource.new) if defined?(ContainerAlertSource)
       AttentionService.register(:hosts, HostAlertSource.new) if defined?(HostAlertSource)
       AttentionService.register(:deploy, DeployAlertSource.new) if defined?(DeployAlertSource)
+      AttentionService.register(:manifests, DriftAlertSource.new) if defined?(DriftAlertSource)
     end
   RUBY
 end

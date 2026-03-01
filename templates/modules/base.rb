@@ -19,6 +19,9 @@
 
 gem "vv-rails", path: "vendor/vv-rails"
 gem "vv-browser-manager", path: "vendor/vv-browser-manager"
+gem "library-platform", path: "vendor/library-platform"
+gem "view_component", ">= 4.0"
+gem "engine-design-system", path: "vendor/engine-design-system"
 
 # --- Vv initializer ---
 
@@ -63,5 +66,22 @@ after_bundle do
 
   environment <<~RUBY, env: :production
     config.action_cable.disable_request_forgery_protection = true
+  RUBY
+
+  # --- D1: Mount Design System engine ---
+  route <<~RUBY
+    mount EngineDesignSystem::Engine, at: "/ds" if defined?(EngineDesignSystem)
+  RUBY
+
+  # --- D2: Design token CSS variables initializer ---
+  initializer "design_system_tokens.rb", <<~RUBY
+    if defined?(EngineDesignSystem)
+      Rails.application.config.after_initialize do
+        # Make design token CSS variables available to all views
+        ActiveSupport.on_load(:action_view) do
+          helper_method :vv_design_tokens_css if respond_to?(:helper_method)
+        end
+      end
+    end
   RUBY
 end

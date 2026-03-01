@@ -37,6 +37,7 @@ example:
     - schema_res
     - events_form_lifecycle
     - events_browser_manager
+    - ui_design_system
     - ui_example_form
     - seeds_webllm
   config:
@@ -48,6 +49,7 @@ mobile:
     - base
     - schema_settings
     - client_llama_stack
+    - ui_design_system
     - ui_chat
   config:
     vv_channel_prefix: vv
@@ -58,6 +60,8 @@ platform_manager:
     - schema_hosts
     - api_containers
     - deploy
+    - planning
+    - ui_design_system
     - ui_dashboard
   config:
     vv_channel_prefix: vv_platform
@@ -94,6 +98,7 @@ individual:
     - api_relay
     - provider_routing
     - client_llama_stack
+    - ui_design_system
     - ui_chat
     - seeds_providers
   config:
@@ -122,6 +127,7 @@ power_user:
     - power_user
     - provider_routing
     - client_llama_stack
+    - ui_design_system
     - ui_chat
     - seeds_providers
   config:
@@ -152,6 +158,7 @@ group:
     - stripe_billing
     - provider_routing
     - client_llama_stack
+    - ui_design_system
     - ui_chat
     - seeds_providers
   config:
@@ -187,8 +194,10 @@ full:
     - events_browser_manager
     - events_llm_bridge
     - client_llama_stack
+    - ui_design_system
     - ui_example_form
     - ui_chat
+    - planning
     - ui_dashboard
     - seeds_providers
     - seeds_webllm

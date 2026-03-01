@@ -86,6 +86,7 @@ after_bundle do
   manifest = {
     profile: @vv_profile_name,
     modules: @vv_applied_modules || [],
+    gg_templates: [],
     gems: vv_gems,
     vv_version: vv_gems["vv-rails"] || "unknown",
     built_at: Time.now.utc.iso8601,
