@@ -29,7 +29,7 @@ after_bundle do
       validates :name, presence: true, uniqueness: true
       validates :domain, presence: true
 
-      scope :active, -> { where.not(status: "removed") }
+      scope :active, -> { where(status: [nil, "new", "deployed", "failed", "rolled_back", "deploying", "rolling_back"]) }
 
       def status_color
         case health_status
