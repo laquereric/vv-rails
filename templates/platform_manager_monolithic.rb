@@ -10,8 +10,8 @@
 
 # --- Gems ---
 
-gem "vv-rails", path: "vendor/vv-rails"
-gem "vv-browser-manager", path: "vendor/vv-browser-manager"
+gem "vv-rails", path: "vendor/vv-rails/engine"
+gem "vv-browser-manager", path: "vendor/vv-browser-manager/engine"
 
 # --- vv:install (inlined — creates initializer and mounts engine) ---
 

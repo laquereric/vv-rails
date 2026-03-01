@@ -17,8 +17,8 @@
 
 # --- Gems ---
 
-gem "vv-rails", path: "vendor/vv-rails"
-gem "vv-browser-manager", path: "vendor/vv-browser-manager"
+gem "vv-rails", path: "vendor/vv-rails/engine"
+gem "vv-browser-manager", path: "vendor/vv-browser-manager/engine"
 gem "library-platform", path: "vendor/library-platform"
 gem "view_component", ">= 4.0"
 gem "engine-design-system", path: "vendor/engine-design-system"

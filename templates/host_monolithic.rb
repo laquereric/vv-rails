@@ -11,9 +11,9 @@
 
 # --- Gems ---
 
-gem "vv-rails", path: "vendor/vv-rails"
-gem "vv-browser-manager", path: "vendor/vv-browser-manager"
-gem "vv-memory", path: "vendor/vv-memory"
+gem "vv-rails", path: "vendor/vv-rails/engine"
+gem "vv-browser-manager", path: "vendor/vv-browser-manager/engine"
+gem "vv-memory", path: "vendor/vv-memory/engine"
 gem "rails_event_store"
 gem "bcrypt", "~> 3.1"
 gem "rack-cors"

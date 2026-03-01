@@ -5,4 +5,4 @@
 
 @vv_applied_modules ||= []; @vv_applied_modules << "memory"
 
-gem "vv-memory", path: "vendor/vv-memory"
+gem "vv-memory", path: "vendor/vv-memory/engine"

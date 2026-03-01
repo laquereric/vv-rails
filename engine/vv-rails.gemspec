@@ -14,8 +14,10 @@ Gem::Specification.new do |spec|
     "lib/**/*",
     "app/**/*",
     "config/**/*",
-    "templates/**/*",
-    "VERSION",
+    "../library/lib/**/*",
+    "../presentation/**/*",
+    "../templates/**/*",
+    "../VERSION",
     "vv-rails.gemspec",
   ]
 
