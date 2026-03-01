@@ -5,6 +5,9 @@
 #
 # Depends on: base, subscription, auth_token, schema_session
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "metering"
+
 after_bundle do
   # --- MeteringService ---
 

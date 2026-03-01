@@ -2,6 +2,9 @@
 #
 # Depends on: base
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "api_containers"
+
 after_bundle do
   file "app/services/docker_service.rb", <<~'RUBY'
     require "yaml"

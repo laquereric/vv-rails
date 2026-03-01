@@ -9,6 +9,9 @@
 # Depends on: base, auth_token, subscription, metering, auth_user,
 #             authorization, api_rest, api_relay, power_user
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "multi_tenant"
+
 gem "rack-attack", "~> 6.7"
 
 after_bundle do

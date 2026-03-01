@@ -5,6 +5,9 @@
 #
 # Depends on: base, events_form_lifecycle, events_browser_manager
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "ui_example_form"
+
 after_bundle do
   # --- Routes ---
 

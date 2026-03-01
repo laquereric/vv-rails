@@ -4,6 +4,9 @@
 #
 # Depends on: base, schema_res
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "events_llm_bridge"
+
 after_bundle do
   # Append to initializer
   append_to_file "config/initializers/vv_rails.rb", <<~'RUBY'

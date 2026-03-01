@@ -5,6 +5,9 @@
 #
 # Depends on: base
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "deploy"
+
 after_bundle do
   # --- Migration ---
 

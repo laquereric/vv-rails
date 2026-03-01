@@ -9,6 +9,9 @@
 #   @vv_app_title       — <title> tag (default: "Vv")
 #   @vv_app_subtitle    — home page subtitle (default: nil)
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "base"
+
 @vv_channel_prefix ||= "vv"
 @vv_app_title      ||= "Vv"
 

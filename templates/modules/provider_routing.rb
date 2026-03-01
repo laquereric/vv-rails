@@ -10,6 +10,9 @@
 #
 # Depends on: base, schema_llm, subscription, metering, api_relay, seeds_providers
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "provider_routing"
+
 after_bundle do
   # --- ProviderRouter service ---
 

@@ -5,6 +5,9 @@
 #
 # Depends on: base, auth_token
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "subscription"
+
 gem "bcrypt", "~> 3.1"
 
 after_bundle do

@@ -2,6 +2,9 @@
 #
 # Depends on: base
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "schema_settings"
+
 after_bundle do
   generate "migration", "CreateSettings key:string:uniq value:text"
 

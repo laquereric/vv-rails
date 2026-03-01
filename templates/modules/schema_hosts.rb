@@ -2,6 +2,9 @@
 #
 # Depends on: base
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "schema_hosts"
+
 after_bundle do
   generate "migration", "CreateHostInstances name:string url:string cable_url:string active:boolean last_seen_at:datetime"
 

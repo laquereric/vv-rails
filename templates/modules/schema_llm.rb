@@ -2,6 +2,9 @@
 #
 # Depends on: base
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "schema_llm"
+
 after_bundle do
   generate "migration", "CreateProviders name:string api_base:string api_key_ciphertext:string priority:integer active:boolean requires_api_key:boolean"
   generate "migration", "CreateModels provider:references name:string api_model_id:string context_window:integer capabilities:json active:boolean cost_input_per_million:decimal cost_output_per_million:decimal"

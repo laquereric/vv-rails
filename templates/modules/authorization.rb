@@ -6,6 +6,9 @@
 #
 # Depends on: base, auth_token, subscription, metering, auth_user
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "authorization"
+
 after_bundle do
   # --- Migrations ---
 

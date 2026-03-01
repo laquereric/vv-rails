@@ -2,6 +2,9 @@
 #
 # Depends on: base
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "schema_res"
+
 gem "rails_event_store"
 
 after_bundle do

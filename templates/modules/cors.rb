@@ -3,6 +3,9 @@
 # Config vars (set before apply):
 #   @cors_resources — array of resource path patterns (default: standard API paths)
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "cors"
+
 gem "rack-cors"
 
 after_bundle do

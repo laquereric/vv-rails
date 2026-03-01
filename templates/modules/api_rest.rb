@@ -2,6 +2,9 @@
 #
 # Depends on: base, auth_token, schema_llm, schema_session, schema_res
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "api_rest"
+
 after_bundle do
   # --- Sessions controller ---
 

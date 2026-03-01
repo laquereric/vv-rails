@@ -2,6 +2,9 @@
 #
 # Depends on: base, schema_llm
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "schema_session"
+
 after_bundle do
   generate "migration", "CreateSessions title:string metadata:json"
   generate "migration", "CreateTurns session:references model:references message_history:json request:text completion:text input_tokens:integer output_tokens:integer duration_ms:integer"

@@ -11,6 +11,7 @@
 # Custom module lists bypass profiles and apply modules in the given order.
 
 require "yaml"
+require "json"
 
 profiles_path = File.join(File.dirname(__FILE__), "profiles.yml")
 profiles = YAML.load_file(profiles_path)
@@ -50,6 +51,11 @@ end
 @vv_app_subtitle   = config["vv_app_subtitle"]    if config["vv_app_subtitle"]
 @cors_resources    = config["cors_resources"]      if config["cors_resources"]
 
+# --- Init module tracking ---
+
+@vv_applied_modules = []
+@vv_profile_name = profile_name || "custom"
+
 # --- Apply modules ---
 
 modules_dir = File.join(File.dirname(__FILE__), "modules")
@@ -65,3 +71,36 @@ modules.each do |mod|
 end
 
 say "Vv Composer: done (#{modules.length} modules applied)"
+
+# --- Write manifest ---
+
+after_bundle do
+  vv_gems = {}
+  lockfile = File.join(destination_root, "Gemfile.lock")
+  if File.exist?(lockfile)
+    File.read(lockfile).scan(/^\s+(vv-[\w-]+)\s+\(([\d.]+)\)/) do |name, version|
+      vv_gems[name] = version
+    end
+  end
+
+  manifest = {
+    profile: @vv_profile_name,
+    modules: @vv_applied_modules || [],
+    gems: vv_gems,
+    vv_version: vv_gems["vv-rails"] || "unknown",
+    built_at: Time.now.utc.iso8601,
+    ruby_version: RUBY_VERSION,
+    rails_version: Rails::VERSION::STRING
+  }
+
+  create_file "config/vv_manifest.json", JSON.pretty_generate(manifest) + "\n"
+
+  # Copy to public/vv/ for static serving
+  FileUtils.mkdir_p(File.join(destination_root, "public", "vv"))
+  FileUtils.cp(
+    File.join(destination_root, "config", "vv_manifest.json"),
+    File.join(destination_root, "public", "vv", "manifest.json")
+  )
+
+  say "Vv Composer: manifest written (#{manifest[:modules].length} modules, #{vv_gems.length} gems)"
+end

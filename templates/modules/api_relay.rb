@@ -2,6 +2,9 @@
 #
 # Depends on: base, auth_token, schema_llm, schema_session
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "api_relay"
+
 after_bundle do
   file "app/controllers/api/relay_controller.rb", <<~RUBY
     module Api

@@ -5,6 +5,9 @@
 #
 # Depends on: base, subscription
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "auth_user"
+
 after_bundle do
   # --- Routes ---
 

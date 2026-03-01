@@ -6,6 +6,9 @@
 #
 # Depends on: base, schema_settings, client_llama_stack
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "ui_chat"
+
 after_bundle do
   # --- Routes ---
 

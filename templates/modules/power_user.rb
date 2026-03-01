@@ -6,6 +6,9 @@
 # Depends on: base, schema_llm, schema_session, auth_token, subscription,
 #             metering, auth_user, authorization, api_rest
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "power_user"
+
 after_bundle do
   # --- Migrations ---
 

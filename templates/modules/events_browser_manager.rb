@@ -4,6 +4,9 @@
 #
 # Depends on: base
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "events_browser_manager"
+
 after_bundle do
   append_to_file "config/initializers/vv_rails.rb", <<~'RUBY'
 

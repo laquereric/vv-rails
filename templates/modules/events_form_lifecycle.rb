@@ -5,6 +5,9 @@
 #
 # Depends on: base, schema_llm, schema_session, schema_res
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "events_form_lifecycle"
+
 after_bundle do
   # Append helpers and handlers to the vv_rails initializer
   append_to_file "config/initializers/vv_rails.rb", <<~'RUBY'

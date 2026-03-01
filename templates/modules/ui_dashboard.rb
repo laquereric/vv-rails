@@ -5,6 +5,9 @@
 #
 # Depends on: base, schema_hosts, api_containers
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "ui_dashboard"
+
 after_bundle do
   # --- Routes ---
 
@@ -824,6 +827,227 @@ after_bundle do
       h.url = "https://verticalvertical.net"
       h.cable_url = "wss://verticalvertical.net/cable"
       h.active = true
+    end
+  RUBY
+
+  # --- E1: AttentionItem value object ---
+
+  file "app/models/attention_item.rb", <<~RUBY
+    class AttentionItem
+      SEVERITIES = %w[critical warning info].freeze
+
+      attr_reader :source, :severity, :title, :message, :context
+
+      def initialize(source:, severity:, title:, message:, context: {})
+        raise ArgumentError, "invalid severity: \#{severity}" unless SEVERITIES.include?(severity.to_s)
+        @source   = source.to_s
+        @severity = severity.to_s
+        @title    = title.to_s
+        @message  = message.to_s
+        @context  = context || {}
+        freeze
+      end
+
+      def as_json(*)
+        { source: source, severity: severity, title: title, message: message, context: context }
+      end
+    end
+  RUBY
+
+  # --- E1: AttentionService registry ---
+
+  file "app/services/attention_service.rb", <<~RUBY
+    class AttentionService
+      class << self
+        def sources
+          @sources ||= {}
+        end
+
+        def register(name, source)
+          sources[name.to_sym] = source
+        end
+
+        def collect(severity: nil, source: nil)
+          items = sources.flat_map do |name, src|
+            src.check
+          rescue StandardError => e
+            Rails.logger.warn("[AttentionService] \#{name} failed: \#{e.message}")
+            []
+          end
+
+          items = items.select { |i| i.severity == severity.to_s } if severity.present?
+          items = items.select { |i| i.source == source.to_s } if source.present?
+          items.sort_by { |i| AttentionItem::SEVERITIES.index(i.severity) || 99 }
+        end
+
+        def counts
+          items = collect
+          {
+            critical: items.count { |i| i.severity == "critical" },
+            warning: items.count { |i| i.severity == "warning" },
+            info: items.count { |i| i.severity == "info" },
+            total: items.length
+          }
+        end
+      end
+    end
+  RUBY
+
+  # --- E2: ContainerAlertSource ---
+
+  file "app/services/container_alert_source.rb", <<~RUBY
+    class ContainerAlertSource
+      def check
+        return [] unless defined?(DockerService)
+
+        DockerService.containers.filter_map do |c|
+          state = c[:state]&.downcase
+          case state
+          when "exited"
+            AttentionItem.new(
+              source: "containers",
+              severity: "critical",
+              title: "\#{c[:service] || c[:name]} exited",
+              message: "Container is not running. Status: \#{c[:status]}",
+              context: { container_id: c[:id], service: c[:service] }
+            )
+          when "restarting"
+            AttentionItem.new(
+              source: "containers",
+              severity: "critical",
+              title: "\#{c[:service] || c[:name]} restarting",
+              message: "Container is in a restart loop. Status: \#{c[:status]}",
+              context: { container_id: c[:id], service: c[:service] }
+            )
+          end
+        end
+      end
+    end
+  RUBY
+
+  # --- E3: HostAlertSource ---
+
+  file "app/services/host_alert_source.rb", <<~RUBY
+    class HostAlertSource
+      def check
+        return [] unless defined?(HostInstance)
+
+        HostInstance.active.map do |host|
+          if host.last_seen_at.nil?
+            AttentionItem.new(
+              source: "hosts",
+              severity: "info",
+              title: "\#{host.name} never connected",
+              message: "Host has not reported in yet.",
+              context: { host_id: host.id, url: host.url }
+            )
+          elsif host.last_seen_at < 30.minutes.ago
+            AttentionItem.new(
+              source: "hosts",
+              severity: "critical",
+              title: "\#{host.name} disconnected",
+              message: "Last seen \#{ApplicationController.helpers.time_ago_in_words(host.last_seen_at)} ago.",
+              context: { host_id: host.id, url: host.url, last_seen_at: host.last_seen_at.iso8601 }
+            )
+          elsif host.last_seen_at < 5.minutes.ago
+            AttentionItem.new(
+              source: "hosts",
+              severity: "warning",
+              title: "\#{host.name} stale",
+              message: "Last seen \#{ApplicationController.helpers.time_ago_in_words(host.last_seen_at)} ago.",
+              context: { host_id: host.id, url: host.url, last_seen_at: host.last_seen_at.iso8601 }
+            )
+          end
+        end.compact
+      end
+    end
+  RUBY
+
+  # --- E3: DeployAlertSource ---
+
+  file "app/services/deploy_alert_source.rb", <<~RUBY
+    class DeployAlertSource
+      def check
+        return [] unless defined?(DeployTarget)
+
+        DeployTarget.active.filter_map do |target|
+          if target.status == "failed"
+            AttentionItem.new(
+              source: "deploy",
+              severity: "critical",
+              title: "\#{target.name} deploy failed",
+              message: "Last deployment failed. Domain: \#{target.domain}",
+              context: { deploy_target_id: target.id, domain: target.domain }
+            )
+          elsif target.status == "deploying" && target.last_deployed_at.present? && target.last_deployed_at < 10.minutes.ago
+            AttentionItem.new(
+              source: "deploy",
+              severity: "warning",
+              title: "\#{target.name} deploy stalled",
+              message: "Deployment has been running for over 10 minutes.",
+              context: { deploy_target_id: target.id, domain: target.domain }
+            )
+          elsif target.stale?
+            AttentionItem.new(
+              source: "deploy",
+              severity: "warning",
+              title: "\#{target.name} stale deploy",
+              message: "Last deployed \#{ApplicationController.helpers.time_ago_in_words(target.last_deployed_at)} ago.",
+              context: { deploy_target_id: target.id, domain: target.domain, last_deployed_at: target.last_deployed_at&.iso8601 }
+            )
+          elsif target.health_status == "unhealthy"
+            AttentionItem.new(
+              source: "deploy",
+              severity: "critical",
+              title: "\#{target.name} unhealthy",
+              message: "Health check failing for \#{target.domain}.",
+              context: { deploy_target_id: target.id, domain: target.domain }
+            )
+          elsif target.health_status == "unreachable"
+            AttentionItem.new(
+              source: "deploy",
+              severity: "critical",
+              title: "\#{target.name} unreachable",
+              message: "Cannot reach \#{target.domain}.",
+              context: { deploy_target_id: target.id, domain: target.domain }
+            )
+          end
+        end
+      end
+    end
+  RUBY
+
+  # --- E1: Attention API controller ---
+
+  file "app/controllers/api/attention_controller.rb", <<~RUBY
+    module Api
+      class AttentionController < ActionController::API
+        def index
+          items = AttentionService.collect(
+            severity: params[:severity],
+            source: params[:source]
+          )
+
+          render json: {
+            counts: AttentionService.counts,
+            items: items.map(&:as_json)
+          }
+        end
+      end
+    end
+  RUBY
+
+  # --- E1: Attention route ---
+
+  route 'get "api/attention", to: "api/attention#index"'
+
+  # --- E1-E3: Register attention sources ---
+
+  initializer "attention_sources.rb", <<~RUBY
+    Rails.application.config.after_initialize do
+      AttentionService.register(:containers, ContainerAlertSource.new) if defined?(ContainerAlertSource)
+      AttentionService.register(:hosts, HostAlertSource.new) if defined?(HostAlertSource)
+      AttentionService.register(:deploy, DeployAlertSource.new) if defined?(DeployAlertSource)
     end
   RUBY
 end

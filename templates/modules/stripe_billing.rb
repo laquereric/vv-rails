@@ -12,6 +12,9 @@
 #
 # Depends on: base, subscription, metering, auth_user
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "stripe_billing"
+
 gem "stripe", ">= 10.0"
 
 after_bundle do

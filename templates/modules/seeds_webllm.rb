@@ -2,6 +2,9 @@
 #
 # Depends on: schema_llm
 
+
+@vv_applied_modules ||= []; @vv_applied_modules << "seeds_webllm"
+
 after_bundle do
   append_to_file "db/seeds.rb", <<~RUBY
 
