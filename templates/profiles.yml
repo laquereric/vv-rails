@@ -57,6 +57,7 @@ platform_manager:
     - base
     - schema_hosts
     - api_containers
+    - deploy
     - ui_dashboard
   config:
     vv_channel_prefix: vv_platform

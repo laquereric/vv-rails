@@ -12,6 +12,7 @@ after_bundle do
     root "dashboard#index"
     get "local", to: "dashboard#local"
     get "public", to: "dashboard#public_tab"
+    get "deploy", to: "dashboard#deploy_tab"
     resources :host_instances, except: [:show]
   RUBY
 
@@ -32,6 +33,12 @@ after_bundle do
       def public_tab
         @host_instances = HostInstance.all.order(:name)
         @active_tab = "public"
+        render :dashboard
+      end
+
+      def deploy_tab
+        @deploy_targets = defined?(DeployTarget) ? DeployTarget.active.order(:name) : []
+        @active_tab = "deploy"
         render :dashboard
       end
     end
@@ -106,6 +113,10 @@ after_bundle do
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <link rel="icon" href="/icon.png" type="image/png">
         <%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>
+        <%= stylesheet_link_tag "platform_manager", "data-turbo-track": "reload" %>
+        <% if (path = Rails.root.join("app/assets/stylesheets/deploy.css")).exist? %>
+          <%= stylesheet_link_tag "deploy", "data-turbo-track": "reload" %>
+        <% end %>
         <%= javascript_importmap_tags %>
       </head>
 
@@ -116,6 +127,7 @@ after_bundle do
             <div class="pm-nav__tabs">
               <a href="/local" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'local' %>">Local</a>
               <a href="/public" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'public' %>">Public</a>
+              <a href="/deploy" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'deploy' %>">Deploy</a>
             </div>
             <div class="pm-nav__version">v0.10.0</div>
           </nav>
@@ -138,6 +150,8 @@ after_bundle do
     <div class="dashboard" data-controller="dashboard" data-dashboard-active-tab-value="<%= @active_tab %>">
       <% if @active_tab == "local" %>
         <%= render "dashboard/local_panel" %>
+      <% elsif @active_tab == "deploy" %>
+        <%= render "dashboard/deploy_panel" if defined?(DeployTarget) %>
       <% else %>
         <%= render "dashboard/public_panel" %>
       <% end %>
