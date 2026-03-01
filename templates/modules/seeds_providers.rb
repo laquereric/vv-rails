@@ -18,6 +18,8 @@ after_bundle do
       m.name = "GPT-4o"
       m.context_window = 128_000
       m.capabilities = { "vision" => true, "function_calling" => true, "streaming" => true }
+      m.cost_input_per_million = 2.50
+      m.cost_output_per_million = 10.00
       m.active = true
     end
 
@@ -32,6 +34,8 @@ after_bundle do
       m.name = "GPT-4o Mini"
       m.context_window = 128_000
       m.capabilities = { "function_calling" => true, "streaming" => true }
+      m.cost_input_per_million = 0.15
+      m.cost_output_per_million = 0.60
       m.active = true
     end
 
@@ -48,6 +52,8 @@ after_bundle do
       m.name = "Claude Sonnet 4.6"
       m.context_window = 200_000
       m.capabilities = { "vision" => true, "streaming" => true }
+      m.cost_input_per_million = 3.00
+      m.cost_output_per_million = 15.00
       m.active = true
     end
 
@@ -62,6 +68,8 @@ after_bundle do
       m.name = "Claude Haiku 4.5"
       m.context_window = 200_000
       m.capabilities = { "streaming" => true }
+      m.cost_input_per_million = 0.80
+      m.cost_output_per_million = 4.00
       m.active = true
     end
 

@@ -17,17 +17,24 @@ after_bundle do
         return unless subscription  # No subscription = no enforcement (dev mode)
 
         if subscription.quota_exceeded?
-          raise QuotaExceededError,
-            "Token quota exceeded. Used \#{subscription.tokens_used.to_fs(:delimited)} " \\
-            "of \#{subscription.plan.token_limit.to_fs(:delimited)} tokens. " \\
-            "Resets at \#{subscription.current_period_end.strftime('%Y-%m-%d')}."
+          if subscription.plan.credit_based?
+            raise QuotaExceededError,
+              "Credit quota exceeded. Used $\#{format('%.4f', subscription.credits_used)} " \\
+              "of $\#{format('%.2f', subscription.plan.credit_limit)} credit budget. " \\
+              "Resets at \#{subscription.current_period_end.strftime('%Y-%m-%d')}."
+          else
+            raise QuotaExceededError,
+              "Token quota exceeded. Used \#{subscription.tokens_used.to_fs(:delimited)} " \\
+              "of \#{subscription.plan.token_limit.to_fs(:delimited)} tokens. " \\
+              "Resets at \#{subscription.current_period_end.strftime('%Y-%m-%d')}."
+          end
         end
       end
 
       # Record token usage after inference
-      def self.record_usage!(subscription, input_tokens:, output_tokens:)
+      def self.record_usage!(subscription, input_tokens:, output_tokens:, model: nil)
         return unless subscription
-        subscription.record_usage!(input_tokens, output_tokens)
+        subscription.record_usage!(input_tokens, output_tokens, model: model)
       end
 
       # Check and reset expired billing periods
@@ -40,7 +47,7 @@ after_bundle do
       # Usage summary for API response
       def self.usage_summary(subscription)
         return nil unless subscription
-        {
+        summary = {
           plan: subscription.plan.slug,
           plan_name: subscription.plan.name,
           tokens_used: subscription.tokens_used,
@@ -51,6 +58,15 @@ after_bundle do
           period_end: subscription.current_period_end&.iso8601,
           status: subscription.status
         }
+        if subscription.plan.credit_based?
+          summary.merge!(
+            credit_based: true,
+            credits_used: subscription.credits_used.to_f,
+            credit_limit: subscription.plan.credit_limit.to_f,
+            credits_remaining: subscription.credits_remaining.to_f
+          )
+        end
+        summary
       end
     end
   RUBY
@@ -87,11 +103,12 @@ after_bundle do
         render json: { error: e.message, quota_exceeded: true }, status: :too_many_requests
       end
 
-      def record_token_usage(input_tokens, output_tokens)
+      def record_token_usage(input_tokens, output_tokens, model: nil)
         MeteringService.record_usage!(
           current_subscription,
           input_tokens: input_tokens,
-          output_tokens: output_tokens
+          output_tokens: output_tokens,
+          model: model
         )
       end
     end

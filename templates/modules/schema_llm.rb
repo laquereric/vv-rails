@@ -4,7 +4,7 @@
 
 after_bundle do
   generate "migration", "CreateProviders name:string api_base:string api_key_ciphertext:string priority:integer active:boolean requires_api_key:boolean"
-  generate "migration", "CreateModels provider:references name:string api_model_id:string context_window:integer capabilities:json active:boolean"
+  generate "migration", "CreateModels provider:references name:string api_model_id:string context_window:integer capabilities:json active:boolean cost_input_per_million:decimal cost_output_per_million:decimal"
   generate "migration", "CreatePresets model:references name:string temperature:float max_tokens:integer system_prompt:text top_p:float parameters:json active:boolean"
 
   file "app/models/provider.rb", <<~RUBY
@@ -42,6 +42,16 @@ after_bundle do
 
       def supports?(capability)
         capabilities_list[capability.to_s] == true
+      end
+
+      def has_cost?
+        cost_input_per_million.present? || cost_output_per_million.present?
+      end
+
+      def cost_for(input_tokens, output_tokens)
+        input_cost = (input_tokens.to_f / 1_000_000) * (cost_input_per_million || 0)
+        output_cost = (output_tokens.to_f / 1_000_000) * (cost_output_per_million || 0)
+        input_cost + output_cost
       end
     end
   RUBY

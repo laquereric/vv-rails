@@ -11,8 +11,8 @@ after_bundle do
   # --- Migrations ---
 
   generate "migration", "CreateUsers email:string:uniq password_digest:string name:string active:boolean"
-  generate "migration", "CreatePlans name:string slug:string:uniq token_limit:integer price_cents:integer billing_period:string active:boolean"
-  generate "migration", "CreateSubscriptions user:references plan:references status:string current_period_start:datetime current_period_end:datetime tokens_used:integer"
+  generate "migration", "CreatePlans name:string slug:string:uniq token_limit:integer price_cents:integer billing_period:string active:boolean credit_limit:decimal"
+  generate "migration", "CreateSubscriptions user:references plan:references status:string current_period_start:datetime current_period_end:datetime tokens_used:integer credits_used:decimal"
 
   # Set defaults on users migration
   users_migration = Dir.glob("db/migrate/*_create_users.rb").first
@@ -31,6 +31,7 @@ after_bundle do
   if subs_migration
     gsub_file subs_migration, 't.string :status', 't.string :status, default: "active"'
     gsub_file subs_migration, 't.integer :tokens_used', 't.integer :tokens_used, default: 0'
+    gsub_file subs_migration, 't.decimal :credits_used', 't.decimal :credits_used, precision: 10, scale: 4, default: 0'
   end
 
   # Add user_id to api_tokens (ties tokens to users)
@@ -63,6 +64,12 @@ after_bundle do
         return 0 unless sub
         [sub.plan.token_limit - sub.tokens_used, 0].max
       end
+
+      def credit_budget_remaining
+        sub = active_subscription
+        return nil unless sub&.plan&.credit_based?
+        sub.credits_remaining
+      end
     end
   RUBY
 
@@ -81,6 +88,10 @@ after_bundle do
 
       def price_dollars
         price_cents / 100.0
+      end
+
+      def credit_based?
+        credit_limit.present? && credit_limit > 0
       end
     end
   RUBY
@@ -105,12 +116,25 @@ after_bundle do
         [plan.token_limit - tokens_used, 0].max
       end
 
-      def quota_exceeded?
-        tokens_used >= plan.token_limit
+      def credits_remaining
+        return nil unless plan.credit_based?
+        [plan.credit_limit - credits_used, 0].max
       end
 
-      def record_usage!(input_tokens, output_tokens)
+      def quota_exceeded?
+        if plan.credit_based?
+          credits_used >= plan.credit_limit
+        else
+          tokens_used >= plan.token_limit
+        end
+      end
+
+      def record_usage!(input_tokens, output_tokens, model: nil)
         increment!(:tokens_used, input_tokens.to_i + output_tokens.to_i)
+        if plan.credit_based? && model&.has_cost?
+          cost = model.cost_for(input_tokens, output_tokens)
+          increment!(:credits_used, cost) if cost > 0
+        end
       end
 
       def reset_period!
@@ -122,14 +146,20 @@ after_bundle do
                    end
         update!(
           tokens_used: 0,
+          credits_used: 0,
           current_period_start: next_start,
           current_period_end: next_end
         )
       end
 
       def usage_percentage
-        return 0 if plan.token_limit.zero?
-        (tokens_used.to_f / plan.token_limit * 100).round(1)
+        if plan.credit_based?
+          return 0 if plan.credit_limit.zero?
+          (credits_used.to_f / plan.credit_limit * 100).round(1)
+        else
+          return 0 if plan.token_limit.zero?
+          (tokens_used.to_f / plan.token_limit * 100).round(1)
+        end
       end
     end
   RUBY
@@ -153,7 +183,8 @@ after_bundle do
       p.token_limit = 10_000_000
       p.price_cents = 2500
       p.billing_period = "monthly"
-      p.active = false  # Not yet available
+      p.credit_limit = 25.0
+      p.active = true
     end
 
     Plan.find_or_create_by!(slug: "group") do |p|
