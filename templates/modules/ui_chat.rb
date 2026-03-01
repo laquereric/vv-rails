@@ -16,8 +16,11 @@ after_bundle do
     resources :sessions, only: [:new, :create, :destroy]
     get "chat/:session_id", to: "chat#show", as: :chat_session
     post "chat/:session_id/send", to: "chat#send_message", as: :chat_session_send
-    root "chat#index"
   RUBY
+
+  unless File.read("config/routes.rb").lines.any? { |l| l.strip.start_with?("root ") }
+    route 'root "chat#index"'
+  end
 
   # --- ChatController ---
 

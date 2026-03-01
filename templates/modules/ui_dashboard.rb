@@ -9,13 +9,16 @@ after_bundle do
   # --- Routes ---
 
   route <<~RUBY
-    root "dashboard#index"
     get "domains", to: "dashboard#domains"
     get "local", to: "dashboard#local"
     get "public", to: "dashboard#public_tab"
     get "deploy", to: "dashboard#deploy_tab"
     resources :host_instances, except: [:show]
   RUBY
+
+  unless File.read("config/routes.rb").lines.any? { |l| l.strip.start_with?("root ") }
+    route 'root "dashboard#index"'
+  end
 
   # --- DashboardController ---
 

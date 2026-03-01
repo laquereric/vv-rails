@@ -8,7 +8,9 @@
 after_bundle do
   # --- Routes ---
 
-  route 'root "app#index"'
+  unless File.read("config/routes.rb").lines.any? { |l| l.strip.start_with?("root ") }
+    route 'root "app#index"'
+  end
   route 'mount RailsEventStore::Browser => "/res" if Rails.env.development?'
 
   # --- AppController ---
