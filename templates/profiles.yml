@@ -90,6 +90,7 @@ individual:
     - authorization
     - api_rest
     - api_relay
+    - provider_routing
     - client_llama_stack
     - ui_chat
     - seeds_providers
@@ -116,6 +117,7 @@ power_user:
     - api_rest
     - api_relay
     - power_user
+    - provider_routing
     - client_llama_stack
     - ui_chat
     - seeds_providers
@@ -144,6 +146,7 @@ group:
     - api_relay
     - power_user
     - multi_tenant
+    - provider_routing
     - client_llama_stack
     - ui_chat
     - seeds_providers
@@ -173,6 +176,7 @@ full:
     - api_relay
     - power_user
     - multi_tenant
+    - provider_routing
     - api_containers
     - events_form_lifecycle
     - events_browser_manager
