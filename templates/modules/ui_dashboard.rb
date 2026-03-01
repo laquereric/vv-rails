@@ -10,6 +10,7 @@ after_bundle do
 
   route <<~RUBY
     root "dashboard#index"
+    get "domains", to: "dashboard#domains"
     get "local", to: "dashboard#local"
     get "public", to: "dashboard#public_tab"
     get "deploy", to: "dashboard#deploy_tab"
@@ -21,7 +22,13 @@ after_bundle do
   file "app/controllers/dashboard_controller.rb", <<~RUBY
     class DashboardController < ApplicationController
       def index
-        redirect_to action: :local
+        redirect_to action: :domains
+      end
+
+      def domains
+        @domains = DomainService.domains
+        @active_tab = "domains"
+        render :dashboard
       end
 
       def local
@@ -41,6 +48,98 @@ after_bundle do
         @active_tab = "deploy"
         render :dashboard
       end
+    end
+  RUBY
+
+  # --- DomainService ---
+
+  file "app/services/domain_service.rb", <<~RUBY
+    class DomainService
+      PRIORITY_ORDER = %w[P0 P1 P2 P3 P4].freeze
+
+      def self.domains(base_path: nil)
+        base_path ||= ENV.fetch("GG_PATH", "/rails/gg")
+        return [] unless Dir.exist?(base_path)
+
+        Dir.glob(File.join(base_path, "gg-*")).select { |f| File.directory?(f) }.map { |dir|
+          parse_domain(dir)
+        }.compact.sort_by { |d| [PRIORITY_ORDER.index(d[:priority]) || 99, d[:domain].to_s] }
+      end
+
+      def self.parse_domain(dir)
+        name = File.basename(dir)
+        readme = File.join(dir, "README.md")
+        priority = nil
+        domain = nil
+        description = nil
+
+        if File.exist?(readme)
+          lines = File.read(readme).lines
+          lines.each do |line|
+            if line.match?(/\\A\\*\\*GTM Priority:\\*\\*/)
+              priority = line.strip.sub(/\\A\\*\\*GTM Priority:\\*\\*\\s*/, "")
+            elsif line.match?(/\\A\\*\\*Domain:\\*\\*/)
+              domain = line.strip.sub(/\\A\\*\\*Domain:\\*\\*\\s*/, "")
+            elsif line.match?(/\\A## What this is/)
+              # next non-blank line is the description
+              idx = lines.index(line)
+              desc_line = lines[(idx + 1)..].find { |l| l.strip.length > 0 }
+              description = desc_line&.strip
+            end
+          end
+        end
+
+        # Fallback domain from folder name: gg-foo-bar-com → FooBarCom (best guess)
+        domain ||= name.sub(/\\Agg-/, "").split("-").map(&:capitalize).join("") + ".unknown"
+        priority ||= "P?"
+
+        last_commit = git_last_commit(dir)
+        github_url = git_remote_url(dir)
+        legacy_engines = detect_legacy_engines(dir)
+
+        {
+          name: name,
+          priority: priority,
+          domain: domain,
+          description: description || "No description available.",
+          last_commit: last_commit,
+          github_url: github_url,
+          legacy_engines: legacy_engines
+        }
+      end
+
+      def self.git_last_commit(dir)
+        result = \`git -C \#{Shellwords.escape(dir)} log --oneline -1 2>/dev/null\`.strip
+        result.empty? ? nil : result
+      rescue
+        nil
+      end
+
+      def self.git_remote_url(dir)
+        result = \`git -C \#{Shellwords.escape(dir)} remote get-url origin 2>/dev/null\`.strip
+        return nil if result.empty?
+        # Convert SSH to HTTPS for display
+        result.sub(/\\Agit@github.com:/, "https://github.com/").sub(/\\.git\\z/, "")
+      rescue
+        nil
+      end
+
+      def self.detect_legacy_engines(dir)
+        engines = []
+        Dir.glob(File.join(dir, "**", "engine-*")).each do |path|
+          next unless File.directory?(path)
+          engines << File.basename(path)
+        end
+        # Also check legacy/ subdirectory
+        Dir.glob(File.join(dir, "legacy", "engine-*")).each do |path|
+          next unless File.directory?(path)
+          name = File.basename(path)
+          engines << name unless engines.include?(name)
+        end
+        engines
+      end
+
+      private_class_method :parse_domain, :git_last_commit, :git_remote_url, :detect_legacy_engines
     end
   RUBY
 
@@ -125,6 +224,7 @@ after_bundle do
           <nav class="pm-nav">
             <a href="/" class="pm-nav__brand"><img src="/vv-logo.png" alt="Vv" style="height: 32px; vertical-align: middle; margin-right: 10px;">Platform Manager</a>
             <div class="pm-nav__tabs">
+              <a href="/domains" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'domains' %>">Domains</a>
               <a href="/local" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'local' %>">Local</a>
               <a href="/public" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'public' %>">Public</a>
               <a href="/deploy" class="pm-nav__tab <%= 'pm-nav__tab--active' if @active_tab == 'deploy' %>">Deploy</a>
@@ -148,7 +248,9 @@ after_bundle do
 
   file "app/views/dashboard/dashboard.html.erb", <<~'ERB'
     <div class="dashboard" data-controller="dashboard" data-dashboard-active-tab-value="<%= @active_tab %>">
-      <% if @active_tab == "local" %>
+      <% if @active_tab == "domains" %>
+        <%= render "dashboard/domains_panel" %>
+      <% elsif @active_tab == "local" %>
         <%= render "dashboard/local_panel" %>
       <% elsif @active_tab == "deploy" %>
         <%= render "dashboard/deploy_panel" if defined?(DeployTarget) %>
@@ -262,6 +364,44 @@ after_bundle do
         </div>
       <% end %>
     </div>
+  ERB
+
+  # --- Domains panel partial ---
+
+  file "app/views/dashboard/_domains_panel.html.erb", <<~'ERB'
+    <div class="panel-header">
+      <h2>GTM Domains</h2>
+    </div>
+
+    <% if @domains.empty? %>
+      <div class="empty-state">
+        <p>No gg-* domain folders found.</p>
+        <p class="empty-state__hint">Set <code>GG_PATH</code> to the directory containing your gg-* repos.</p>
+      </div>
+    <% else %>
+      <div class="domain-grid">
+        <% @domains.each do |d| %>
+          <div class="domain-card domain-card--<%= d[:priority].downcase %>">
+            <div class="domain-card__header">
+              <span class="domain-card__name"><%= d[:domain] %></span>
+              <span class="domain-card__priority domain-card__priority--<%= d[:priority].downcase %>"><%= d[:priority] %></span>
+            </div>
+            <div class="domain-card__description"><%= d[:description] %></div>
+            <% if d[:github_url] %>
+              <a href="<%= d[:github_url] %>" class="domain-card__repo" target="_blank"><%= d[:name] %></a>
+            <% else %>
+              <span class="domain-card__repo"><%= d[:name] %></span>
+            <% end %>
+            <% if d[:last_commit] %>
+              <div class="domain-card__commit"><%= d[:last_commit] %></div>
+            <% end %>
+            <% if d[:legacy_engines].any? %>
+              <div class="domain-card__legacy">Legacy: <%= d[:legacy_engines].join(", ") %></div>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
   ERB
 
   # --- Host instance form ---
@@ -601,6 +741,31 @@ after_bundle do
     .host-card__url { font-family: monospace; font-size: 13px; color: #888; margin-bottom: 12px; }
     .host-card__metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 12px; padding: 12px; background: #f8f9fa; border-radius: 6px; }
     .host-card__actions { display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid #f0f2f5; }
+
+    /* Domain Grid */
+    .domain-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 16px; }
+
+    /* Domain Card */
+    .domain-card { background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border-left: 4px solid #ddd; transition: box-shadow 0.2s ease; }
+    .domain-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+    .domain-card--p0 { border-left-color: #dc3545; }
+    .domain-card--p1 { border-left-color: #fd7e14; }
+    .domain-card--p2 { border-left-color: #ffc107; }
+    .domain-card--p3 { border-left-color: #007bff; }
+    .domain-card--p4 { border-left-color: #6c757d; }
+    .domain-card__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .domain-card__name { font-weight: 600; font-size: 16px; color: #1a1a2e; }
+    .domain-card__priority { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; padding: 3px 8px; border-radius: 12px; background: #e9ecef; color: #666; }
+    .domain-card__priority--p0 { background: #f8d7da; color: #721c24; }
+    .domain-card__priority--p1 { background: #ffe5d0; color: #984c0c; }
+    .domain-card__priority--p2 { background: #fff3cd; color: #856404; }
+    .domain-card__priority--p3 { background: #cce5ff; color: #004085; }
+    .domain-card__priority--p4 { background: #e9ecef; color: #495057; }
+    .domain-card__description { font-size: 14px; color: #555; margin-bottom: 10px; line-height: 1.4; }
+    .domain-card__repo { display: block; font-family: monospace; font-size: 13px; color: #888; margin-bottom: 8px; text-decoration: none; }
+    a.domain-card__repo:hover { color: #007bff; }
+    .domain-card__commit { font-size: 12px; color: #999; font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px; }
+    .domain-card__legacy { font-size: 12px; color: #fd7e14; font-style: italic; }
 
     /* Metrics */
     .metric { text-align: center; }
