@@ -1,9 +1,11 @@
-# modules/api_containers.rb — Docker container control API
+# modules/api_containers.rb — Docker container control API + repo metadata
 #
 # Depends on: base
 
 after_bundle do
   file "app/services/docker_service.rb", <<~'RUBY'
+    require "yaml"
+
     class DockerService
       COMPOSE_PROJECT = ENV.fetch("COMPOSE_PROJECT_NAME", "vv-platform")
 
@@ -11,16 +13,18 @@ after_bundle do
         json = `docker compose -p #{COMPOSE_PROJECT} ps --format json 2>/dev/null`
         return [] if json.blank?
 
+        metadata = repo_metadata
+
         json.lines.filter_map do |line|
           data = JSON.parse(line) rescue next
           service = data["Service"]
           health = data["Health"].presence
 
+          # Merge health from metadata cache if not available from Docker
           unless health
-            cached = Rails.cache.read("health_check:#{service}")
-            if cached
-              ago = (Time.current - cached[:checked_at]).round
-              health = "#{cached[:status]} (#{ago}s ago)"
+            meta = metadata.find { |m| m.dig("local_container", "service") == service }
+            if meta && meta.dig("local_container", "health")
+              health = meta.dig("local_container", "health")
             else
               health = "N/A"
             end
@@ -49,46 +53,66 @@ after_bundle do
       def self.start(container_id)
         system("docker", "start", container_id.to_s)
       end
+
+      # --- Repo metadata ---
+
+      def self.repo_metadata
+        Rails.cache.fetch("repo_metadata", expires_in: 5.minutes) { [] }
+      end
+
+      def self.all_metadata
+        repo_metadata
+      end
+
+      def self.vv_repos
+        repo_metadata.select { |m| m["name"]&.start_with?("vv-") }
+      end
+
+      def self.gg_repos
+        repo_metadata.select { |m| m["name"]&.start_with?("gg-") }
+      end
     end
   RUBY
 
-  file "app/jobs/health_check_job.rb", <<~'RUBY'
-    require "net/http"
+  file "app/jobs/metadata_collector_job.rb", <<~'RUBY'
+    require "yaml"
 
-    class HealthCheckJob < ApplicationJob
+    class MetadataCollectorJob < ApplicationJob
       queue_as :default
 
-      def perform
-        DockerService.containers.each do |c|
-          service = c[:service]
-          next if service == "platform_manager"
-          next unless c[:state] == "running"
+      VV_BIN   = "/rails/vv-bin/vv-metadata"
+      VV_ROOT  = "/rails/vv"
+      GG_ROOT  = "/rails/gg"
 
-          status = ping("http://#{service}:80/up") ? "healthy" : "unhealthy"
-          Rails.cache.write("health_check:#{service}", { status: status, checked_at: Time.current })
+      def perform
+        # Run vv-metadata script if available
+        if File.exist?(VV_BIN)
+          system("ruby", VV_BIN, "--vv-root", VV_ROOT, "--gg-root", GG_ROOT,
+                 out: File::NULL, err: File::NULL)
         end
 
+        # Glob and parse all METADATA.yml files
+        files = Dir.glob("#{VV_ROOT}/vv-*/METADATA.yml") +
+                Dir.glob("#{GG_ROOT}/gg-*/METADATA.yml")
+
+        metadata = files.filter_map do |path|
+          YAML.safe_load_file(path) rescue nil
+        end
+
+        Rails.cache.write("repo_metadata", metadata, expires_in: 5.minutes)
+
+        # Re-enqueue
         self.class.set(wait: 60.seconds).perform_later
-      end
-
-      private
-
-      def ping(url)
-        uri = URI(url)
-        http = Net::HTTP.new(uri.host, uri.port)
-        http.open_timeout = 5
-        http.read_timeout = 5
-        response = http.get(uri.path)
-        response.code.to_i < 400
-      rescue StandardError
-        false
+      rescue StandardError => e
+        Rails.logger.error("[MetadataCollectorJob] #{e.message}")
+        self.class.set(wait: 60.seconds).perform_later
       end
     end
   RUBY
 
-  initializer "health_check.rb", <<~'RUBY'
+  initializer "metadata_collector.rb", <<~'RUBY'
     Rails.application.config.after_initialize do
-      HealthCheckJob.perform_later if defined?(Rails::Server)
+      MetadataCollectorJob.perform_later if defined?(Rails::Server)
     end
   RUBY
 
@@ -119,6 +143,27 @@ after_bundle do
     end
   RUBY
 
+  file "app/controllers/api/local/repos_controller.rb", <<~RUBY
+    module Api
+      module Local
+        class ReposController < ActionController::API
+          def index
+            metadata = DockerService.all_metadata
+
+            case params[:filter]
+            when "vv"
+              metadata = DockerService.vv_repos
+            when "gg"
+              metadata = DockerService.gg_repos
+            end
+
+            render json: metadata
+          end
+        end
+      end
+    end
+  RUBY
+
   route <<~RUBY
     namespace :api do
       namespace :local do
@@ -129,6 +174,7 @@ after_bundle do
             post :restart
           end
         end
+        resources :repos, only: [:index]
       end
     end
   RUBY
