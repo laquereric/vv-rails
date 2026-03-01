@@ -29,6 +29,33 @@ Rails engine gem providing server-side Vv integration via Action Cable.
 
 All templates include both `vv-rails` and `vv-browser-manager` gems.
 
+## Composable Modules
+
+27 modules in `templates/modules/`, composed via `templates/composer.rb`:
+
+```bash
+VV_PROFILE=group rails new myapp -m templates/composer.rb
+```
+
+11 profiles in `templates/profiles.yml`:
+| Profile | Key modules | Purpose |
+|---------|-------------|---------|
+| `host` | base, schema_*, api_rest, api_relay, auth_token | API-only host |
+| `individual` | + subscription, metering, auth_user, authorization, ui_chat | Solo dev with auth |
+| `power_user` | + power_user (agents, credits) | Agents + credit-based billing |
+| `group` | + multi_tenant (tenants, dual metering, rate limiting) | Multi-user tenancy |
+| `full` | all 27 modules | Single-container everything |
+
+Key modules for subscription tiers:
+| Module | Provides |
+|--------|----------|
+| `subscription.rb` | User, Plan, Subscription models |
+| `metering.rb` | MeteringService, Metered concern, usage API |
+| `auth_user.rb` | Login, register, account views |
+| `authorization.rb` | Roles, policies, scoped queries |
+| `power_user.rb` | Agent model, /v1/agents CRUD + invoke |
+| `multi_tenant.rb` | Tenant, TenantMembership, TenantSubscription, Current, TenantScopedModel, TenantContext, TenantMeteringService, Rack::Attack, vv-memory tenant patching |
+
 ## Schema (host.rb + example.rb)
 
 ```
@@ -49,6 +76,13 @@ Session   1 ──→ N  Turn ────────────────�
 | `event_store_events` | RES-managed. 9 event types stored in streams `"session:{id}"` |
 | `turns` | One LLM request/response: model, preset, message_history snapshot (json), request, completion, token counts |
 | `api_tokens` | Host only — Bearer token auth via BCrypt |
+| `users` | Auth: email, password_digest, name, role (admin/member), active |
+| `plans` | Subscription tiers: individual, power_user, group |
+| `subscriptions` | Per-user metered subscription with token/credit tracking |
+| `agents` | Published agent configs: model + preset + system prompt |
+| `tenants` | Multi-tenancy unit: name, slug, tier, settings (json) |
+| `tenant_memberships` | User-tenant links with role (admin/member) |
+| `tenant_subscriptions` | Shared pool metering per tenant |
 
 ## Events (Rails Event Store)
 
