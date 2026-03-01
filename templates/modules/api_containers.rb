@@ -13,14 +13,27 @@ after_bundle do
 
         json.lines.filter_map do |line|
           data = JSON.parse(line) rescue next
+          service = data["Service"]
+          health = data["Health"].presence
+
+          unless health
+            cached = Rails.cache.read("health_check:#{service}")
+            if cached
+              ago = (Time.current - cached[:checked_at]).round
+              health = "#{cached[:status]} (#{ago}s ago)"
+            else
+              health = "N/A"
+            end
+          end
+
           {
             id: data["ID"],
             name: data["Name"],
-            service: data["Service"],
+            service: service,
             state: data["State"],
             status: data["Status"],
-            ports: data["Ports"],
-            health: data["Health"] || "N/A"
+            ports: data["Ports"].to_s.scan(/(?<=:)\d+(?=->)/).uniq.join(", "),
+            health: health
           }
         end
       end
@@ -36,6 +49,46 @@ after_bundle do
       def self.start(container_id)
         system("docker", "start", container_id.to_s)
       end
+    end
+  RUBY
+
+  file "app/jobs/health_check_job.rb", <<~'RUBY'
+    require "net/http"
+
+    class HealthCheckJob < ApplicationJob
+      queue_as :default
+
+      def perform
+        DockerService.containers.each do |c|
+          service = c[:service]
+          next if service == "platform_manager"
+          next unless c[:state] == "running"
+
+          status = ping("http://#{service}:80/up") ? "healthy" : "unhealthy"
+          Rails.cache.write("health_check:#{service}", { status: status, checked_at: Time.current })
+        end
+
+        self.class.set(wait: 60.seconds).perform_later
+      end
+
+      private
+
+      def ping(url)
+        uri = URI(url)
+        http = Net::HTTP.new(uri.host, uri.port)
+        http.open_timeout = 5
+        http.read_timeout = 5
+        response = http.get(uri.path)
+        response.code.to_i < 400
+      rescue StandardError
+        false
+      end
+    end
+  RUBY
+
+  initializer "health_check.rb", <<~'RUBY'
+    Rails.application.config.after_initialize do
+      HealthCheckJob.perform_later if defined?(Rails::Server)
     end
   RUBY
 
